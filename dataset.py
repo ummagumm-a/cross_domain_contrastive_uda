@@ -11,6 +11,7 @@ class UDADataset(Dataset):
         assert labels is None or len(items) == len(labels)
         
         self.items = items
+        self.real_labels = labels.copy()
         self.labels = labels
         
     def update_labels(self, new_labels):
@@ -32,7 +33,7 @@ def second_last_dir(path):
     return os.path.split(os.path.split(path)[0])[1]
 
 def office_label_mapping():
-    images_dir = os.path.join(os.getcwd(), 'datasets', 'office31', 'amazon', 'images')
+    images_dir = os.path.join(os.getcwd(), 'datasets', 'OFFICE31', 'amazon', 'images')
     images = Path(images_dir).rglob('*.jpg')
     images = list(map(str, images))
     labels = list(map(second_last_dir, images))
@@ -42,15 +43,19 @@ def office_label_mapping():
 class OfficeDataset(Dataset):
     def __init__(self, name, transform=None):
         
-        images_dir = os.path.join(os.getcwd(), 'datasets', 'office31', name, 'images')
+        images_dir = os.path.join(os.getcwd(), 'datasets', 'OFFICE31', name, 'images')
         images = Path(images_dir).rglob('*.jpg')
         images = list(map(str, images))
         label_mapping = office_label_mapping()
         self.class_names = list(label_mapping.keys())
         labels = list(map(second_last_dir, images))
         labels = list(map(lambda x: label_mapping[x], labels))
+        
         self.pairs = list(zip(images, labels))
-        shuffle(self.pairs)
+#         shuffle(self.pairs)
+#         self.labels = list(map(lambda x: x[1], self.pairs))
+        self.labels = labels
+        self.real_labels = self.labels.copy()
         
         if transform is None:
             transform = T.Compose([T.ToTensor(), T.Resize((300, 300))])
@@ -71,6 +76,7 @@ class OfficeDataset(Dataset):
         
         for i in range(len(self.pairs)):
             self.pairs[i] = (self.pairs[i][0], new_labels[i])
+            self.labels = new_labels
     
     def __len__(self):
         return len(self.pairs)
@@ -79,5 +85,6 @@ class OfficeDataset(Dataset):
         pair = self.pairs[i]
         with Image.open(pair[0]) as img:
             img = self.transform(img)
+
         return img, pair[1]
         
