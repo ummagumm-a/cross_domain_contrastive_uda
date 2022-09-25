@@ -18,7 +18,7 @@ class UDAModel(pl.LightningModule):
     def __init__(self, feature_extractor, classification_head, n_classes, 
                        source_dataset, target_dataset, 
                        tau=1., b=0.75, test_size=0.3, lmbda=1.4,
-                       batch_size=64, num_workers=48, pin_memory=True,
+                       batch_size=64, num_workers=48,
                        total_epochs=None, class_names=None):
         super().__init__()
         self.n_classes = n_classes
@@ -34,7 +34,6 @@ class UDAModel(pl.LightningModule):
         self.test_size = test_size
         self.batch_size = batch_size
         self.num_workers = num_workers
-        self.pin_memory = pin_memory
         
         self.total_epochs = self.check_total_epochs(total_epochs)
         self.class_names = self.check_class_names(class_names)
@@ -114,6 +113,7 @@ class UDAModel(pl.LightningModule):
             batch_class_means = torch.zeros_like(accum, dtype=torch.float32, device=self.device)\
                                      .scatter_add_(0, y, features)
             accum += batch_class_means
+            
 
         initial_centers = accum / labels_count.float().unsqueeze(1)
 
@@ -139,7 +139,7 @@ class UDAModel(pl.LightningModule):
             features = features.cpu().numpy()
             all_features.append(features)
         all_features = np.vstack(all_features)
-
+        
         self.clusterizer.fit(all_features)
     
     def assign_labels(self):
@@ -159,8 +159,8 @@ class UDAModel(pl.LightningModule):
     def visualize_pseudo_labeling(self):
         real_labels, labels = [], []
         for i in range(len(self.target_dataset)):
-            real_labels.append(self.target_dataset.real_labels[i])
-            labels.append(self.target_dataset.labels[i])
+            real_labels.append(self.target_dataset.get_real_labels()[i])
+            labels.append(self.target_dataset.get_labels()[i])
 
         real_labels, labels = np.array(real_labels), np.array(labels)
         pairs = np.vstack((real_labels, labels))
@@ -170,13 +170,16 @@ class UDAModel(pl.LightningModule):
         
     def on_train_epoch_start(self):
         self.feature_extractor.eval()
+        # Only for RemoveMismatched
+#         self.target_dataset.reset()
         with torch.no_grad():
             self.calculate_class_centers()
             self.fit_clusterizer()
             assigned_labels = self.assign_labels()
             self.target_dataset.update_labels(assigned_labels)
-#             self.visualize_pseudo_labeling()
-            self.log('unique labels', len(np.unique(assigned_labels)))
+#             self.target_dataset.update_labels(self.target_dataset.get_real_labels())
+#            self.visualize_pseudo_labeling()
+            self.log('unique labels', len(np.unique(self.target_dataset.get_labels())))
             
         self.feature_extractor.train()
     
@@ -197,7 +200,11 @@ class UDAModel(pl.LightningModule):
         other_x, other_y = other_batch
         
         def helper(anchor_item, other_items):
-            return torch.exp(other_items @ anchor_item / self.tau)
+            sims = other_items @ anchor_item
+            # Explicit negative sampling
+#            sims = sims[sims > 0.5]
+            
+            return torch.exp(sims / self.tau)
         
         contrastive_loss = 0
         for x, y in zip(*anchors_batch):
@@ -225,37 +232,36 @@ class UDAModel(pl.LightningModule):
         
         return (x1, y1), (x2, y2)
     
-    def training_step(self, batch, batch_idx):
-        #logger.debug(f'start of training_step. batch: {batch_idx}')
+    def training_step(self, batch):
+        logger.debug('start of training_step')
         source_for_classification, (source_x, source_y) = self.split_batch_in_two(batch['source'])
         classification_loss = self.classification_step(source_for_classification)
 #         classification_loss = self.classification_step(batch['source'])
         
-#         target_x, target_y = batch['target']
+        target_x, target_y = batch['target']
         
 # #         logger.debug(f'training_step batch_size: {len(source_for_classification[0])}, {len(source_x)}, {len(target_x)}')
-#         target_features = self.feature_extractor(target_x, 1)
+        target_features = self.feature_extractor(target_x, 1)
         source_features = self.feature_extractor(source_x, 0)
-#         contrastive_loss = self.contrastive_step((target_features, target_y), (source_features, source_y)) \
-#                          + self.contrastive_step((source_features, source_y), (target_features, target_y))
+        contrastive_loss = self.contrastive_step((target_features, target_y), (source_features, source_y)) \
+                         + self.contrastive_step((source_features, source_y), (target_features, target_y))
         
-        source_cls_x, source_cls_y = source_for_classification
-        source_cls_features = self.feature_extractor(source_cls_x, 0)
-        contrastive_loss = self.contrastive_step((source_cls_features, source_cls_y), (source_features, source_y))
-        
+#         source_cls_x, source_cls_y = source_for_classification
+#         source_cls_features = self.feature_extractor(source_cls_x, 0)
+#         contrastive_loss = self.contrastive_step((source_cls_features, source_cls_y), (source_features, source_y))
         train_loss = classification_loss + self.lmbda * contrastive_loss
         
         self.log_dict({
             "classification_loss": classification_loss,
             "contrastive_loss": contrastive_loss,
             "train_loss": train_loss
-        })
+        }, on_epoch=True, on_step=False)
         
-        #logger.debug(f'end of training_step. batch: {batch_idx}')
+        logger.debug('end of training_step')
         
         return train_loss
     
-    def val_metrics(self, pred, y):
+    def val_metrics(self, pred, y, prefix):
         # TODO: for optimization may need to first calculate tp, tn, fp, fn
         accuracy = self.accuracy_metric(pred, y)
         precision = self.precision_metric(pred, y)
@@ -263,30 +269,35 @@ class UDAModel(pl.LightningModule):
         
         log_dict = {}
         for i, class_name in enumerate(self.class_names):
-            log_dict[f'accuracy_{class_name}'] = accuracy[i]
-            log_dict[f'precision_{class_name}'] = precision[i]
-            log_dict[f'recall_{class_name}'] = recall[i]
+            log_dict[f'{prefix}_accuracy_{class_name}'] = accuracy[i]
+            log_dict[f'{prefix}_precision_{class_name}'] = precision[i]
+            log_dict[f'{prefix}_recall_{class_name}'] = recall[i]
             
         return log_dict
-        
-    def validation_step(self, batch, batch_idx):
+
+    def validation_step(self, batch, batch_idx, dataloader_idx):
         x, y = batch
-#         logger.debug(f'validation_step batch_size: {len(x)}')
-        
-        pred = self(x, 0)
-        loss = self.classification_loss(pred, y)
-        
-        self.log("val_loss", loss)
-        self.log_dict(self.val_metrics(pred, y))
-        
-        return loss
+        if dataloader_idx == 0:
+            pred = self(x, 0)
+            loss = self.classification_loss(pred, y)
+
+            self.log("source_val_loss", loss, on_epoch=True, on_step=False, add_dataloader_idx=False)
+            self.log_dict(self.val_metrics(pred, y, 'source'), on_epoch=True, on_step=False, add_dataloader_idx=False)
+        elif dataloader_idx == 1:
+            pred = self(x, 0)
+            loss = self.classification_loss(pred, y)
+
+            self.log("target_val_loss", loss, on_epoch=True, on_step=False, add_dataloader_idx=False)
+            self.log_dict(self.val_metrics(pred, y, 'target'), on_epoch=True, on_step=False, add_dataloader_idx=False)
+        else:
+            raise Exception(f'Weird dataloader_idx: {dataloader_idx}')
         
     def setup(self, stage):
         if stage == 'fit':
             l = len(self.source_dataset)
             test_len = int(self.test_size * l)
             lens = (l - test_len, test_len)
-            logger.info(f'Train and test lengths: {lens}. Target dataset length: {len(self.target_dataset)}.')
+            logger.info(f'Train and test lengths: {lens}')
             
             self.train_source_dataset, self.val_source_dataset = \
                 random_split(self.source_dataset, lens)
@@ -294,44 +305,46 @@ class UDAModel(pl.LightningModule):
     def dataloader_target_for_clustering(self):
         return DataLoader(self.target_dataset,
                           batch_size=self.batch_size,
-                          pin_memory=self.pin_memory,
+                          pin_memory=True,
                           shuffle=False,
-                          num_workers=self.num_workers,
-                          timeout=300)
+                          num_workers=self.num_workers)
     
     def dataloader_source_for_centroids(self):
         return DataLoader(self.train_source_dataset,
                           batch_size=self.batch_size,
-                          pin_memory=self.pin_memory,
+                          pin_memory=True,
                           shuffle=True,
-                          num_workers=self.num_workers,
-                          timeout=300)
+                          num_workers=self.num_workers)
     
     def train_dataloader(self):
         dataloaders = {}
         dataloaders['source'] = \
                             DataLoader(self.train_source_dataset,
                                        batch_size=self.batch_size * 2,
-                                       pin_memory=self.pin_memory,
+                                       pin_memory=True,
                                        shuffle=True,
-                                       num_workers=self.num_workers * 2,
-                                       timeout=300)
+                                       num_workers=self.num_workers * 2)
         dataloaders['target'] = \
                             DataLoader(self.target_dataset,
                                        batch_size=self.batch_size,
-                                       pin_memory=self.pin_memory,
+                                       pin_memory=True,
                                        shuffle=True,
-                                       num_workers=self.num_workers,
-                                       timeout=300)
+                                       num_workers=self.num_workers)
         
         return dataloaders
     
     def val_dataloader(self):
-        dataloader = DataLoader(self.val_source_dataset,
-                                batch_size=self.batch_size,
-                                pin_memory=self.pin_memory,
-                                shuffle=False,
-                                num_workers=self.num_workers,
-                                timeout=300)
+        dataloaders = []
+        dataloaders.append(DataLoader(self.val_source_dataset,
+                                      batch_size=self.batch_size,
+                                      pin_memory=True,
+                                      shuffle=False,
+                                      num_workers=self.num_workers))
         
-        return dataloader
+        dataloaders.append(DataLoader(self.target_dataset,
+                                      batch_size=self.batch_size,
+                                      pin_memory=True,
+                                      shuffle=False,
+                                      num_workers=self.num_workers))
+        
+        return dataloaders
