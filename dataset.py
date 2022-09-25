@@ -5,6 +5,7 @@ from PIL import Image
 from pathlib import Path
 import torchvision.transforms as T
 from random import shuffle
+import torch
 
 class UDADataset(Dataset):
     def __init__(self, items, labels):
@@ -42,7 +43,6 @@ def office_label_mapping():
 
 class OfficeDataset(Dataset):
     def __init__(self, name, transform=None):
-        
         images_dir = os.path.join(os.getcwd(), 'datasets', 'OFFICE31', name, 'images')
         images = Path(images_dir).rglob('*.jpg')
         images = list(map(str, images))
@@ -52,8 +52,7 @@ class OfficeDataset(Dataset):
         labels = list(map(lambda x: label_mapping[x], labels))
         
         self.pairs = list(zip(images, labels))
-#         shuffle(self.pairs)
-#         self.labels = list(map(lambda x: x[1], self.pairs))
+        
         self.labels = labels
         self.real_labels = self.labels.copy()
         
@@ -66,7 +65,10 @@ class OfficeDataset(Dataset):
         return list(map(lambda x: x[0], self.pairs))
     
     def get_labels(self):
-        return list(map(lambda x: x[1], self.pairs))
+        return self.labels
+    
+    def get_real_labels(self):
+        return self.real_labels
     
     def get_class_names(self):
         return self.class_names
@@ -76,7 +78,7 @@ class OfficeDataset(Dataset):
         
         for i in range(len(self.pairs)):
             self.pairs[i] = (self.pairs[i][0], new_labels[i])
-            self.labels = new_labels
+        self.labels = new_labels
     
     def __len__(self):
         return len(self.pairs)
@@ -86,5 +88,39 @@ class OfficeDataset(Dataset):
         with Image.open(pair[0]) as img:
             img = self.transform(img)
 
-        return img, pair[1]
+        return img, torch.tensor(pair[1], dtype=torch.long)
+    
+class RemoveMismatchedAdapter(Dataset):
+    def __init__(self, dataset):
+        self.dataset = dataset
+        self.matched_pairs_idx = list(range(len(dataset)))
         
+    def reset(self):
+        self.matched_pairs_idx = list(range(len(self.dataset)))
+        
+    def get_class_names(self):
+        return self.dataset.get_class_names()
+      
+    def get_labels(self):
+        labels = [self.dataset.get_labels()[i] for i in self.matched_pairs_idx]
+        return labels
+    
+    def get_real_labels(self):
+        real_labels = [self.dataset.get_real_labels()[i] for i in self.matched_pairs_idx]
+        return real_labels
+    
+    def update_labels(self, new_labels):
+        self.dataset.update_labels(new_labels)
+        
+        self.matched_pairs_idx = []
+        for i in range(len(self.dataset)):
+            if self.dataset.real_labels[i] == self.dataset.labels[i]:
+                self.matched_pairs_idx.append(i)
+    
+    def __len__(self):
+        return len(self.matched_pairs_idx)
+    
+    def __getitem__(self, i):
+        i = self.matched_pairs_idx[i]
+        
+        return self.dataset[i]

@@ -171,7 +171,7 @@ class UDAModel(pl.LightningModule):
     def on_train_epoch_start(self):
         self.feature_extractor.eval()
         # Only for RemoveMismatched
-#         self.target_dataset.reset()
+        self.target_dataset.reset()
         with torch.no_grad():
             self.calculate_class_centers()
             self.fit_clusterizer()
