@@ -200,9 +200,9 @@ class UDAModel(pl.LightningModule):
         other_x, other_y = other_batch
         
         def helper(anchor_item, other_items):
-            sims = other_items @ anchor_item
             # Explicit negative sampling
-            sims = sims[sims > 0.5]
+            sims = other_items @ anchor_item
+#            sims = sims[sims > 0.5]
             
             return torch.exp(sims / self.tau)
         
@@ -212,11 +212,14 @@ class UDAModel(pl.LightningModule):
             if len(same_class) == 0:
                 continue
                 
-            contrastive_loss -= torch.nanmean(
+            temp = torch.nanmean(
                 torch.log(
                     helper(x, same_class) / torch.sum(helper(x, other_x))
                 )
             )
+            
+            if not temp.isnan():
+                contrastive_loss -= temp
             
         return contrastive_loss
     
@@ -273,6 +276,10 @@ class UDAModel(pl.LightningModule):
             log_dict[f'{prefix}_precision_{class_name}'] = precision[i]
             log_dict[f'{prefix}_recall_{class_name}'] = recall[i]
             
+        log_dict[f'{prefix}_accuracy'] = torch.nanmean(accuracy)
+        log_dict[f'{prefix}_precision'] = torch.nanmean(precision)
+        log_dict[f'{prefix}_recall'] = torch.nanmean(recall)
+        
         return log_dict
 
     def validation_step(self, batch, batch_idx, dataloader_idx):

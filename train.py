@@ -17,7 +17,7 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
     pl.seed_everything(41)
 
-    total_epochs = 300
+    total_epochs = 1000
     transform = T.Compose([T.Resize((300, 300)), T.ToTensor()])
     amazon_dataset = OfficeDataset('amazon', transform=transform)
     webcam_dataset = OfficeDataset('webcam', transform=transform)
@@ -42,7 +42,7 @@ if __name__ == '__main__':
                      num_workers=1,
                      class_names=amazon_dataset.get_class_names())
     # model.setup('fit')
-    tb_logger = TensorBoardLogger('lightning_logs', version='negative_sampling')
+    tb_logger = TensorBoardLogger('lightning_logs', version='baseline')
 
     trainer = pl.Trainer(accelerator='gpu', devices=[7], #strategy='ddp',
                          max_epochs=total_epochs, #logger=False,
