@@ -171,7 +171,7 @@ class UDAModel(pl.LightningModule):
     def on_train_epoch_start(self):
         self.feature_extractor.eval()
         # Only for RemoveMismatched
-#        self.target_dataset.reset()
+        self.target_dataset.reset()
         with torch.no_grad():
             self.calculate_class_centers()
             self.fit_clusterizer()
@@ -202,7 +202,7 @@ class UDAModel(pl.LightningModule):
         def helper(anchor_item, other_items):
             sims = other_items @ anchor_item
             # Explicit negative sampling
-            sims = sims[sims > 0.5]
+#            sims = sims[sims > 0.5]
             
             return torch.exp(sims / self.tau)
         
