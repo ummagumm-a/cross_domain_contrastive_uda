@@ -272,7 +272,11 @@ class UDAModel(pl.LightningModule):
             log_dict[f'{prefix}_accuracy_{class_name}'] = accuracy[i]
             log_dict[f'{prefix}_precision_{class_name}'] = precision[i]
             log_dict[f'{prefix}_recall_{class_name}'] = recall[i]
-            
+          
+        log_dict[f'{prefix}_accuracy'] = torch.nanmean(accuracy)
+        log_dict[f'{prefix}_precision'] = torch.nanmean(precision)
+        log_dict[f'{prefix}_recall'] = torch.nanmean(recall)
+
         return log_dict
 
     def validation_step(self, batch, batch_idx, dataloader_idx):
