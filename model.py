@@ -9,6 +9,7 @@ import numpy as np
 # from kmeans_pytorch import kmeans
 from sklearn.cluster import KMeans
 import os
+import plotly.express as px
 
 import logging
 logger = logging.getLogger(__name__)
@@ -233,7 +234,7 @@ class UDAModel(pl.LightningModule):
         return (x1, y1), (x2, y2)
     
     def training_step(self, batch):
-        logger.debug('start of training_step')
+        #logger.debug('start of training_step')
         source_for_classification, (source_x, source_y) = self.split_batch_in_two(batch['source'])
         classification_loss = self.classification_step(source_for_classification)
 #         classification_loss = self.classification_step(batch['source'])
@@ -257,7 +258,7 @@ class UDAModel(pl.LightningModule):
             "train_loss": train_loss
         }, on_epoch=True, on_step=False)
         
-        logger.debug('end of training_step')
+        #logger.debug('end of training_step')
         
         return train_loss
     
@@ -297,7 +298,7 @@ class UDAModel(pl.LightningModule):
             l = len(self.source_dataset)
             test_len = int(self.test_size * l)
             lens = (l - test_len, test_len)
-            logger.info(f'Train and test lengths: {lens}')
+            #logger.info(f'Train and test lengths: {lens}')
             
             self.train_source_dataset, self.val_source_dataset = \
                 random_split(self.source_dataset, lens)
