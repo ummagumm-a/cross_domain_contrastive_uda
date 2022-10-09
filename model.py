@@ -168,6 +168,25 @@ class UDAModel(pl.LightningModule):
         fig = px.scatter_3d(x=unique_pairs[0, :], y=unique_pairs[1, :], z=counts)
         fig.show()
         
+    def class_analysis(self, dataset):
+        labels = dataset.get_labels()
+        labels = np.array(labels)
+        real_labels = dataset.get_real_labels()
+        real_labels = np.array(real_labels)
+
+        # find unassigned labels
+        unassigned_labels = set(range(31)).difference(np.unique(labels).tolist())
+        self.logger.experiment.add_text('unassigned labels', 
+                                        str(unassigned_labels), self.current_epoch)
+
+        # for each class find the distribution of assigned classes
+        label_stats = {}
+        for i in range(31):
+            ilabels = labels[real_labels == i]
+            self.logger.experiment.add_histogram(f'class {i} assigned to:', 
+                                                 ilabels, self.current_epoch,
+                                                 bins=31)
+        
     def on_train_epoch_start(self):
         self.feature_extractor.eval()
         # Only for RemoveMismatched
@@ -179,6 +198,7 @@ class UDAModel(pl.LightningModule):
             self.target_dataset.update_labels(assigned_labels)
 #             self.target_dataset.update_labels(self.target_dataset.get_real_labels())
 #            self.visualize_pseudo_labeling()
+            self.class_analysis(self.target_dataset)
             self.log('unique labels', len(np.unique(self.target_dataset.get_labels())))
             
         self.feature_extractor.train()
