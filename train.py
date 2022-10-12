@@ -9,6 +9,7 @@ import torch.nn as nn
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks import ModelCheckpoint, DeviceStatsMonitor, StochasticWeightAveraging
+import torch
 import logging
 #import torch.multiprocessing
 #torch.multiprocessing.set_sharing_strategy('file_system')
@@ -61,7 +62,7 @@ if __name__ == '__main__':
 #                                           patience=50,
 #                                          ),
                              ModelCheckpoint(monitor='source_val_loss', 
-                                             save_last=False, 
+                                             save_last=True, 
                                              save_top_k=1,
                                              auto_insert_metric_name=True,
                                              ),
@@ -69,4 +70,9 @@ if __name__ == '__main__':
                          ]
                         )
 
+    ckpt_path = 'lightning_logs/lightning_logs/negative_sampling_source_pretrain/checkpoints/epoch=873-step=13984.ckpt'
+    checkpoint = torch.load(ckpt_path, map_location='cpu')
+    global_step_offset = checkpoint["global_step"]
+    trainer.fit_loop.epoch_loop._batches_that_stepped = global_step_offset
+    del checkpoint
     trainer.fit(model)#, train_dataloaders=model.train_dataloader(), val_dataloaders=model.val_dataloader())
