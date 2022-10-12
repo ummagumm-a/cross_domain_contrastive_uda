@@ -19,7 +19,7 @@ class UDAModel(pl.LightningModule):
     def __init__(self, feature_extractor, classification_head, n_classes, 
                        source_dataset, target_dataset, 
                        tau=1., b=0.75, test_size=0.3, lmbda=1.4,
-                       batch_size=64, num_workers=48,
+                       batch_size=64, num_workers=48, pretrain_num_epochs=500,
                        total_epochs=None, class_names=None):
         super().__init__()
         self.n_classes = n_classes
@@ -35,6 +35,7 @@ class UDAModel(pl.LightningModule):
         self.test_size = test_size
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.pretrain_num_epochs = pretrain_num_epochs 
         
         self.total_epochs = self.check_total_epochs(total_epochs)
         self.class_names = self.check_class_names(class_names)
@@ -259,17 +260,20 @@ class UDAModel(pl.LightningModule):
         classification_loss = self.classification_step(source_for_classification)
 #         classification_loss = self.classification_step(batch['source'])
         
-        target_x, target_y = batch['target']
-        
-# #         logger.debug(f'training_step batch_size: {len(source_for_classification[0])}, {len(source_x)}, {len(target_x)}')
-        target_features = self.feature_extractor(target_x, 1)
-        source_features = self.feature_extractor(source_x, 0)
-        contrastive_loss = self.contrastive_step((target_features, target_y), (source_features, source_y)) \
-                         + self.contrastive_step((source_features, source_y), (target_features, target_y))
-        
-#         source_cls_x, source_cls_y = source_for_classification
-#         source_cls_features = self.feature_extractor(source_cls_x, 0)
-#         contrastive_loss = self.contrastive_step((source_cls_features, source_cls_y), (source_features, source_y))
+        if self.pretrain_num_epochs <= self.current_epoch:
+            target_x, target_y = batch['target']
+            
+    # #         logger.debug(f'training_step batch_size: {len(source_for_classification[0])}, {len(source_x)}, {len(target_x)}')
+            target_features = self.feature_extractor(target_x, 1)
+            source_features = self.feature_extractor(source_x, 0)
+            contrastive_loss = self.contrastive_step((target_features, target_y), (source_features, source_y)) \
+                             + self.contrastive_step((source_features, source_y), (target_features, target_y))
+            
+    #         source_cls_x, source_cls_y = source_for_classification
+    #         source_cls_features = self.feature_extractor(source_cls_x, 0)
+    #         contrastive_loss = self.contrastive_step((source_cls_features, source_cls_y), (source_features, source_y))
+        else:
+            contrastive_loss = -1
         train_loss = classification_loss + self.lmbda * contrastive_loss
         
         self.log_dict({
