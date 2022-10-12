@@ -75,4 +75,4 @@ if __name__ == '__main__':
     global_step_offset = checkpoint["global_step"]
     trainer.fit_loop.epoch_loop._batches_that_stepped = global_step_offset
     del checkpoint
-    trainer.fit(model)#, train_dataloaders=model.train_dataloader(), val_dataloaders=model.val_dataloader())
+    trainer.fit(model, ckpt_path=ckpt_path)#, train_dataloaders=model.train_dataloader(), val_dataloaders=model.val_dataloader())
