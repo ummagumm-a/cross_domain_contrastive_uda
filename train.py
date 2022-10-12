@@ -17,7 +17,8 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
     pl.seed_everything(41)
 
-    total_epochs = 1000
+    total_epochs = 1200
+    pretrain_epochs = 500
     transform = T.Compose([T.Resize((300, 300)), T.ToTensor()])
     amazon_dataset = OfficeDataset('amazon', transform=transform)
     webcam_dataset = OfficeDataset('webcam', transform=transform)
@@ -39,10 +40,10 @@ if __name__ == '__main__':
     model = UDAModel(resnet, classification_head, num_classes, 
                      amazon_dataset, webcam_dataset, 
                      total_epochs=total_epochs, batch_size=64,
-                     num_workers=1,
+                     num_workers=1, pretrain_num_epochs=pretrain_epochs,
                      class_names=amazon_dataset.get_class_names())
     # model.setup('fit')
-    tb_logger = TensorBoardLogger('lightning_logs', version='baseline')
+    tb_logger = TensorBoardLogger('lightning_logs', version='baseline_source_pretrain')
 
     trainer = pl.Trainer(accelerator='gpu', devices=[7], #strategy='ddp',
                          max_epochs=total_epochs, #logger=False,
@@ -55,10 +56,10 @@ if __name__ == '__main__':
     #                     num_sanity_val_steps=0, #precision=16,
     #                      profiler='advanced',
                          callbacks=[
-                             EarlyStopping(monitor='source_val_loss', 
-                                           mode='min',
-                                           patience=50,
-                                          ),
+#                             EarlyStopping(monitor='source_val_loss', 
+#                                           mode='min',
+#                                           patience=50,
+#                                          ),
                              ModelCheckpoint(monitor='source_val_loss', 
                                              save_last=False, 
                                              save_top_k=1,
