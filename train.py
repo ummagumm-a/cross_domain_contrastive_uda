@@ -62,7 +62,7 @@ if __name__ == '__main__':
 #                                           patience=total_epochs,
 #                                          ),
                              ModelCheckpoint(monitor='source_val_loss', 
-                                             save_last=False, 
+                                             save_last=True, 
                                              save_top_k=1,
                                              auto_insert_metric_name=True,
                                              ),
