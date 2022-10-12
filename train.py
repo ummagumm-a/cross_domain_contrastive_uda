@@ -1,4 +1,5 @@
 import torchvision.transforms as T
+import torch
 import pytorch_lightning as pl
 from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
 from resnetdsbn import resnet50dsbn
@@ -17,7 +18,8 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
     pl.seed_everything(41)
 
-    total_epochs = 1000
+    total_epochs = 1200
+    pretrain_epochs = 500
     transform = T.Compose([T.Resize((300, 300)), T.ToTensor()])
     amazon_dataset = OfficeDataset('amazon', transform=transform)
     webcam_dataset = RemoveMismatchedAdapter(OfficeDataset('webcam', transform=transform))
@@ -39,12 +41,12 @@ if __name__ == '__main__':
     model = UDAModel(resnet, classification_head, num_classes, 
                      amazon_dataset, webcam_dataset, 
                      total_epochs=total_epochs, batch_size=64,
-                     num_workers=1,
+                     num_workers=1, pretrain_num_epochs=pretrain_epochs,
                      class_names=amazon_dataset.get_class_names())
     # model.setup('fit')
-    tb_logger = TensorBoardLogger('lightning_logs', version='remove_mismatched')
+    tb_logger = TensorBoardLogger('lightning_logs', version='remove_mismatched_source_pretrain')
 
-    trainer = pl.Trainer(accelerator='gpu', devices=[6], #strategy='ddp',
+    trainer = pl.Trainer(accelerator='gpu', devices=[4], #strategy='ddp',
                          max_epochs=total_epochs, #logger=False,
                          logger=tb_logger,
     #                      track_grad_norm=2, 
@@ -55,10 +57,10 @@ if __name__ == '__main__':
     #                     num_sanity_val_steps=0, #precision=16,
     #                      profiler='advanced',
                          callbacks=[
-                             EarlyStopping(monitor='source_val_loss', 
-                                           mode='min',
-                                           patience=50,
-                                          ),
+#                             EarlyStopping(monitor='source_val_loss', 
+#                                           mode='min',
+#                                           patience=total_epochs,
+#                                          ),
                              ModelCheckpoint(monitor='source_val_loss', 
                                              save_last=False, 
                                              save_top_k=1,
@@ -68,4 +70,9 @@ if __name__ == '__main__':
                          ]
                         )
 
-    trainer.fit(model)#, train_dataloaders=model.train_dataloader(), val_dataloaders=model.val_dataloader())
+    ckpt_path = 'lightning_logs/lightning_logs/remove_mismatched_source_pretrain/checkpoints/epoch=504-step=8080.ckpt'
+    checkpoint = torch.load(ckpt_path, map_location='cpu')
+    global_step_offset = checkpoint["global_step"]
+    trainer.fit_loop.epoch_loop._batches_that_stepped = global_step_offset
+    del checkpoint  
+    trainer.fit(model, ckpt_path=ckpt_path)
