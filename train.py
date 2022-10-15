@@ -18,8 +18,8 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
     pl.seed_everything(41)
 
-    total_epochs = 1200
-    pretrain_epochs = 500
+    total_epochs = 2500
+    pretrain_epochs = 0
     transform = T.Compose([T.Resize((300, 300)), T.ToTensor()])
     amazon_dataset = OfficeDataset('amazon', transform=transform)
     webcam_dataset = OfficeDataset('webcam', transform=transform)
@@ -44,7 +44,7 @@ if __name__ == '__main__':
                      num_workers=1, pretrain_num_epochs=pretrain_epochs,
                      class_names=amazon_dataset.get_class_names())
     # model.setup('fit')
-    tb_logger = TensorBoardLogger('lightning_logs', version='negative_sampling_source_pretrain')
+    tb_logger = TensorBoardLogger('lightning_logs', version='negative_sampling')
 
     trainer = pl.Trainer(accelerator='gpu', devices=[5], #strategy='ddp',
                          max_epochs=total_epochs, #logger=False,
@@ -70,7 +70,7 @@ if __name__ == '__main__':
                          ]
                         )
 
-    ckpt_path = 'lightning_logs/lightning_logs/negative_sampling_source_pretrain/checkpoints/epoch=873-step=13984.ckpt'
+    ckpt_path = 'lightning_logs/lightning_logs/negative_sampling/checkpoints/last.ckpt'
     checkpoint = torch.load(ckpt_path, map_location='cpu')
     global_step_offset = checkpoint["global_step"]
     trainer.fit_loop.epoch_loop._batches_that_stepped = global_step_offset
