@@ -19,7 +19,7 @@ class UDAModel(pl.LightningModule):
     def __init__(self, feature_extractor, classification_head, n_classes, 
                        source_dataset, target_dataset, 
                        tau=1., b=0.75, test_size=0.3, lmbda=1.4, explicit_negative_sampling_threshold=0.5,
-                       batch_size=64, num_workers=48, pretrain_num_epochs=500,
+                       batch_size=64, num_workers=48, pretrain_num_epochs=0,
                        total_epochs=None, class_names=None):
         super().__init__()
         self.n_classes = n_classes
@@ -103,7 +103,7 @@ class UDAModel(pl.LightningModule):
         labels_count = torch.zeros(self.n_classes, dtype=torch.long, device=self.device)
 
         # TODO: may result in overflow. Rewrite with running mean.
-        for x, y in dataloader:
+        for x, y, _ in dataloader:
             x = x.to(self.device)
             y = y.to(self.device)
             features = self.feature_extractor(x, 0)
@@ -136,7 +136,7 @@ class UDAModel(pl.LightningModule):
     def fit_clusterizer(self):
         dataloader = self.dataloader_target_for_clustering()
         all_features = []
-        for x, _ in dataloader:
+        for x, _, _ in dataloader:
             x = x.to(self.device)
             features = self.feature_extractor(x, 1)
             features = features.cpu().numpy()
@@ -149,7 +149,7 @@ class UDAModel(pl.LightningModule):
         dataloader = self.dataloader_target_for_clustering()
 
         collected_labels = []
-        for x, _ in dataloader:
+        for x, _, _ in dataloader:
             x = x.to(self.device)
             features = self.feature_extractor(x, 1)
             features = features.cpu().numpy()
@@ -207,7 +207,7 @@ class UDAModel(pl.LightningModule):
         self.feature_extractor.train()
     
     def classification_step(self, batch):
-        source_x, source_y = batch
+        source_x, source_y, _ = batch
         
         pred = self(source_x, 0)
         classification_loss = self.classification_loss(pred, source_y)
@@ -215,15 +215,168 @@ class UDAModel(pl.LightningModule):
         return classification_loss
     
     def get_same_class(self, batch, cls):
-        x, y = batch
+        x, y, _ = batch
         
         return x[y == cls]
     
-    def contrastive_step(self, anchors_batch, other_batch):
-        other_x, other_y = other_batch
+    def analyze_negative_samples(self, anchor, negatives, positives, anchor_type):
+        if anchor_type == 'source':
+            # since anchor is from source, its class is unambiguous
+            # Therefore, we'll check correctness of pseudo-labeling in target batch
+            # For that we'll use actual labels of targets.
+            x, y, _ = anchor
+            neg_x, _, neg_y_real = negatives
+            pos_x, _, pos_y_real = positives
+#             neg_y_real_above = neg_y_real[negatives_mask]
+#             neg_y_real_below = neg_y_real[~negatives_mask]
+#             # amount of remaining samples
+#             num_above = len(neg_y_real_above)
+#             # amount of left-out samples
+#             num_below = len(neg_y_real_below)
+#             # amount of positive samples
+#             num_pos = len(pos_y_real)
+#             # for hard negatives - fraction of samples of the same class as anchor incorrectly assigned as negative
+#             false_negative_ratio_above = (neg_y_real_above == y).sum() / num_above
+#             # for soft negatives - fraction of samples of the same class as anchor incorrectly assigned as negative
+#             false_negative_ratio_below = (neg_y_real_below == y).sum() / num_below
+#             # for positives - fraction of samples of the different class as anchor incorrectly assigned as positive
+#             false_negative_ratio_positives = (pos_y_real != y).sum() / num_pos
+            
+#             # log fractions to tensorboard
+#             self.logger.experiment.add_scalars('source_anchor; false negative ratio', 
+#                                               {
+#                                                   'above': false_negative_ratio_above,
+#                                                   'below': false_negative_ratio_below,
+#                                                   'positives': false_negative_ratio_positives
+#                                               }, self.global_step)
+            
+#             # log amounts to tensorboard
+#             self.logger.experiment.add_scalars('source_anchor; num_samples', 
+#                                               {
+#                                                   'above': num_above,
+#                                                   'below': num_below,
+#                                                   'positives': num_pos
+#                                               }, self.global_step)
+                
+            false_negatives_sims = neg_x[neg_y_real == y]
+            if len(false_negatives_sims) != 0:
+                self.logger.experiment.add_histogram('source_anchor, false negative sims', 
+                                                     false_negatives_sims, 
+                                                     self.global_step)
+                self.logger.experiment.add_histogram(f'source_anchor, false negative sims, anchor {y}', 
+                                                     false_negatives_sims, 
+                                                     self.global_step)
+            
+            true_negatives_sims = neg_x[neg_y_real != y]
+            if len(true_negatives_sims) != 0:
+                self.logger.experiment.add_histogram('source_anchor, true negative sims', 
+                                                     true_negatives_sims, 
+                                                     self.global_step)
+                self.logger.experiment.add_histogram(f'source_anchor, true negative sims, anchor {y}', 
+                                                     true_negatives_sims, 
+                                                     self.global_step)
+                
+            false_positives_sims = pos_x[pos_y_real != y]
+            if len(false_positives_sims) != 0:
+                self.logger.experiment.add_histogram('source_anchor, false positive sims', 
+                                                     false_positives_sims, 
+                                                     self.global_step)
+                self.logger.experiment.add_histogram(f'source_anchor, false positive sims, anchor {y}', 
+                                                     false_positives_sims, 
+                                                     self.global_step)
+            
+            true_positives_sims = pos_x[pos_y_real == y]
+            if len(true_positives_sims) != 0:
+                self.logger.experiment.add_histogram('source_anchor, true positive sims', 
+                                                     true_positives_sims, 
+                                                     self.global_step)
+                self.logger.experiment.add_histogram(f'source_anchor, true positive sims, anchor {y}', 
+                                                     true_positives_sims, 
+                                                     self.global_step)
+            
+            
+        elif anchor_type == 'target':
+            # The anchor is from target, therefore its label may be incorrect.
+            # Having a source batch, we'll check how much samples are of the same actual class
+            # as target anchor
+            x, _, y_real = anchor
+            neg_x, neg_y, _ = negatives
+            pos_x, pos_y, _ = positives
+#             neg_y_above = neg_y[negatives_mask]
+#             neg_y_below = neg_y[~negatives_mask]
+#             # amount of remaining samples
+#             num_above = len(neg_y_above)
+#             # amount of left-out samples
+#             num_below = len(neg_y_below)
+#             # amount of positive samples
+#             num_pos = len(pos_y)
+#             # for hard negatives - fraction of samples of the same class as anchor incorrectly assigned as negative
+#             false_negative_ratio_above = (neg_y_above == y_real).sum() / num_above
+#             # for soft negatives - fraction of samples of the same class as anchor incorrectly assigned as negative
+#             false_negative_ratio_below = (neg_y_below == y_real).sum() / num_below
+#             # for positives - fraction of samples of the different class as anchor incorrectly assigned as positive
+#             false_negative_ratio_positives = (pos_y != y_real).sum() / num_pos
+            
+#             # log fractions to tensorboard
+#             self.logger.experiment.add_scalars('target_anchor; false negative ratio', 
+#                                               {
+#                                                   'above': false_negative_ratio_above,
+#                                                   'below': false_negative_ratio_below,
+#                                                   'positives': false_negative_ratio_positives
+#                                               }, self.global_step)
+            
+#             # log amounts to tensorboard
+#             self.logger.experiment.add_scalars('target_anchor; num_samples', 
+#                                               {
+#                                                   'above': num_above,
+#                                                   'below': num_below,
+#                                                   'positives': num_pos
+#                                               }, self.global_step)
+            
+            false_negatives_sims = neg_x[neg_y == y_real]
+            if len(false_negatives_sims) != 0:
+                self.logger.experiment.add_histogram('target_anchor, false negative sims', 
+                                                     false_negatives_sims, 
+                                                     self.global_step)
+                self.logger.experiment.add_histogram(f'target_anchor, false negative sims, anchor {y_real}', 
+                                                     false_negatives_sims, 
+                                                     self.global_step)
+            
+            true_negatives_sims = neg_x[neg_y != y_real]
+            if len(true_negatives_sims) != 0:
+                self.logger.experiment.add_histogram('target_anchor, true negative sims', 
+                                                     true_negatives_sims, 
+                                                     self.global_step)
+                self.logger.experiment.add_histogram(f'target_anchor, true negative sims, anchor {y_real}', 
+                                                     true_negatives_sims, 
+                                                     self.global_step)
+                
+            false_positives_sims = pos_x[pos_y != y_real]
+            if len(false_positives_sims) != 0:
+                self.logger.experiment.add_histogram('target_anchor, false positive sims', 
+                                                     false_positives_sims, 
+                                                     self.global_step)
+                self.logger.experiment.add_histogram(f'target_anchor, false positive sims, anchor {y_real}', 
+                                                     false_positives_sims, 
+                                                     self.global_step)
+            
+            true_positives_sims = pos_x[pos_y == y_real]
+            if len(true_positives_sims) != 0:
+                self.logger.experiment.add_histogram('target_anchor, true positive sims', 
+                                                     true_positives_sims, 
+                                                     self.global_step)
+                self.logger.experiment.add_histogram(f'target_anchor, true positive sims, anchor {y_real}', 
+                                                     true_positives_sims, 
+                                                     self.global_step)
+                
+        else:
+            raise Exception(f"Wrong anchor type: {anchor_type}")
+    
+    def contrastive_step(self, anchors_batch, other_batch, anchor_type):
+        other_x, other_y, other_y_real = other_batch
         
         contrastive_loss = 0
-        for x, y in zip(*anchors_batch):
+        for x, y, y_real in zip(*anchors_batch):
             same_class_indices = other_batch[1] == y
             if not same_class_indices.any():
                 continue
@@ -234,6 +387,10 @@ class UDAModel(pl.LightningModule):
             positives_sims = positives @ x
             positives_exp = torch.exp(positives_sims / self.tau)
             negatives_sims = negatives @ x
+            self.analyze_negative_samples((x, y, y_real), 
+                                          (negatives_sims, other_y[~same_class_indices], other_y_real[~same_class_indices]),
+                                          (positives_sims, other_y[same_class_indices], other_y_real[same_class_indices]),
+                                          anchor_type)
             negatives_sims = negatives_sims[negatives_sims > self.explicit_negative_sampling_threshold]
             negatives_exp = torch.exp(negatives_sims / self.tau)
 
@@ -247,31 +404,42 @@ class UDAModel(pl.LightningModule):
         return contrastive_loss
     
     def split_batch_in_two(self, batch):
-        (x, y) = batch
+        (x, y, y_real) = batch
         half_batch_len = len(x) // 2
         x1 = x[:half_batch_len]
         y1 = y[:half_batch_len]
+        y_real1 = y_real[:half_batch_len]
         x2 = x[half_batch_len:]
         y2 = y[half_batch_len:]
+        y_real2 = y_real[half_batch_len:]
         
         assert abs(len(x1) - len(x2)) <= 1, f'{abs(len(x1) - len(x2))}'
         
-        return (x1, y1), (x2, y2)
+        return (x1, y1, y_real1), (x2, y2, y_real2)
     
     def training_step(self, batch):
         #logger.debug('start of training_step')
-        source_for_classification, (source_x, source_y) = self.split_batch_in_two(batch['source'])
+        source_for_classification, (source_x, source_y, source_y_real) = self.split_batch_in_two(batch['source'])
         classification_loss = self.classification_step(source_for_classification)
 #         classification_loss = self.classification_step(batch['source'])
         
         if self.pretrain_num_epochs <= self.current_epoch:
-            target_x, target_y = batch['target']
+            target_x, target_y, target_y_real = batch['target']
             
     # #         logger.debug(f'training_step batch_size: {len(source_for_classification[0])}, {len(source_x)}, {len(target_x)}')
             target_features = self.feature_extractor(target_x, 1)
             source_features = self.feature_extractor(source_x, 0)
-            contrastive_loss = self.contrastive_step((target_features, target_y), (source_features, source_y)) \
-                             + self.contrastive_step((source_features, source_y), (target_features, target_y))
+            contrastive_target_anchor = self.contrastive_step(
+                (target_features, target_y, target_y_real), 
+                (source_features, source_y, source_y_real), 
+                'target'
+            )
+            contrastive_source_anchor = self.contrastive_step(
+                (source_features, source_y, source_y_real), 
+                (target_features, target_y, target_y_real), 
+                'source'
+            )
+            contrastive_loss = contrastive_target_anchor + contrastive_source_anchor
             
     #         source_cls_x, source_cls_y = source_for_classification
     #         source_cls_features = self.feature_extractor(source_cls_x, 0)
@@ -309,7 +477,7 @@ class UDAModel(pl.LightningModule):
         return log_dict
 
     def validation_step(self, batch, batch_idx, dataloader_idx):
-        x, y = batch
+        x, y, y_real = batch
         if dataloader_idx == 0:
             pred = self(x, 0)
             loss = self.classification_loss(pred, y)
@@ -318,10 +486,10 @@ class UDAModel(pl.LightningModule):
             self.log_dict(self.val_metrics(pred, y, 'source'), on_epoch=True, on_step=False, add_dataloader_idx=False)
         elif dataloader_idx == 1:
             pred = self(x, 0)
-            loss = self.classification_loss(pred, y)
+            loss = self.classification_loss(pred, y_real)
 
             self.log("target_val_loss", loss, on_epoch=True, on_step=False, add_dataloader_idx=False)
-            self.log_dict(self.val_metrics(pred, y, 'target'), on_epoch=True, on_step=False, add_dataloader_idx=False)
+            self.log_dict(self.val_metrics(pred, y_real, 'target'), on_epoch=True, on_step=False, add_dataloader_idx=False)
         else:
             raise Exception(f'Weird dataloader_idx: {dataloader_idx}')
         
