@@ -325,12 +325,12 @@ class UDAModel(pl.LightningModule):
         
         contrastive_loss = 0
         for x, y, y_real in zip(*anchors_batch):
-            same_class_indices = other_batch[1] == y
+            same_class_indices = other_y == y
             if not same_class_indices.any():
                 continue
 
-            positives = other_batch[0][same_class_indices]
-            negatives = other_batch[0][~same_class_indices]
+            positives = other_x[same_class_indices]
+            negatives = other_x[~same_class_indices]
 
             positives_sims = positives @ x
             positives_exp = torch.exp(positives_sims / self.tau)
