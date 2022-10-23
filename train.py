@@ -44,9 +44,9 @@ if __name__ == '__main__':
                      num_workers=1, pretrain_num_epochs=pretrain_epochs,
                      class_names=amazon_dataset.get_class_names())
     # model.setup('fit')
-    tb_logger = TensorBoardLogger('lightning_logs', version='negative_sampling')
+    tb_logger = TensorBoardLogger('lightning_logs', version='negative_sampling_wo_numerator_threshold')
 
-    trainer = pl.Trainer(accelerator='gpu', devices=[5], #strategy='ddp',
+    trainer = pl.Trainer(accelerator='gpu', devices=[4], #strategy='ddp',
                          max_epochs=total_epochs, #logger=False,
                          logger=tb_logger,
     #                      track_grad_norm=2, 
@@ -70,9 +70,9 @@ if __name__ == '__main__':
                          ]
                         )
 
-    ckpt_path = 'lightning_logs/lightning_logs/negative_sampling/checkpoints/last.ckpt'
-    checkpoint = torch.load(ckpt_path, map_location='cpu')
-    global_step_offset = checkpoint["global_step"]
-    trainer.fit_loop.epoch_loop._batches_that_stepped = global_step_offset
-    del checkpoint
-    trainer.fit(model, ckpt_path=ckpt_path)#, train_dataloaders=model.train_dataloader(), val_dataloaders=model.val_dataloader())
+#    ckpt_path = 'lightning_logs/lightning_logs/negative_sampling/checkpoints/last.ckpt'
+#    checkpoint = torch.load(ckpt_path, map_location='cpu')
+#    global_step_offset = checkpoint["global_step"]
+#    trainer.fit_loop.epoch_loop._batches_that_stepped = global_step_offset
+#    del checkpoint
+    trainer.fit(model)#, ckpt_path=ckpt_path)#, train_dataloaders=model.train_dataloader(), val_dataloaders=model.val_dataloader())

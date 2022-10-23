@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class UDAModel(pl.LightningModule):
     def __init__(self, feature_extractor, classification_head, n_classes, 
                        source_dataset, target_dataset, 
-                       tau=1., b=0.75, test_size=0.3, lmbda=1.4,
+                       tau=1., b=0.75, test_size=0.3, lmbda=1.4, explicit_negative_sampling_threshold=0.5,
                        batch_size=64, num_workers=48, pretrain_num_epochs=500,
                        total_epochs=None, class_names=None):
         super().__init__()
@@ -30,6 +30,7 @@ class UDAModel(pl.LightningModule):
         self.classification_loss = nn.CrossEntropyLoss()
         
         self.tau = tau
+        self.explicit_negative_sampling_threshold = explicit_negative_sampling_threshold
         self.b = b
         self.lmbda = lmbda
         self.test_size = test_size
@@ -221,24 +222,27 @@ class UDAModel(pl.LightningModule):
     def contrastive_step(self, anchors_batch, other_batch):
         other_x, other_y = other_batch
         
-        def helper(anchor_item, other_items):
-            sims = other_items @ anchor_item
-            # Explicit negative sampling
-            sims = sims[sims > 0.5]
-            
-            return torch.exp(sims / self.tau)
-        
         contrastive_loss = 0
         for x, y in zip(*anchors_batch):
-            same_class = self.get_same_class(other_batch, y)
-            if len(same_class) == 0:
+            same_class_indices = other_batch[1] == y
+            if not same_class_indices.any():
                 continue
-                
-            contrastive_loss -= torch.nanmean(
-                torch.log(
-                    helper(x, same_class) / torch.sum(helper(x, other_x))
-                )
-            )
+
+            positives = other_batch[0][same_class_indices]
+            negatives = other_batch[0][~same_class_indices]
+
+            positives_sims = positives @ x
+            positives_exp = torch.exp(positives_sims / self.tau)
+            negatives_sims = negatives @ x
+            negatives_sims = negatives_sims[negatives_sims > self.explicit_negative_sampling_threshold]
+            negatives_exp = torch.exp(negatives_sims / self.tau)
+
+            logit = positives_exp / (negatives_exp.sum() + positives_exp.sum())
+            log = torch.log(logit)
+            sum_over_all_positives = torch.nanmean(log)
+            
+            if not sum_over_all_positives.isnan():
+                contrastive_loss -= sum_over_all_positives
             
         return contrastive_loss
     
