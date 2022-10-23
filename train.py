@@ -9,6 +9,7 @@ import torch.nn as nn
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks import ModelCheckpoint, DeviceStatsMonitor, StochasticWeightAveraging
+import torch
 import logging
 #import torch.multiprocessing
 #torch.multiprocessing.set_sharing_strategy('file_system')
@@ -17,7 +18,8 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
     pl.seed_everything(41)
 
-    total_epochs = 300
+    total_epochs = 2500
+    pretrain_epochs = 0
     transform = T.Compose([T.Resize((300, 300)), T.ToTensor()])
     amazon_dataset = OfficeDataset('amazon', transform=transform)
     webcam_dataset = OfficeDataset('webcam', transform=transform)
@@ -39,12 +41,12 @@ if __name__ == '__main__':
     model = UDAModel(resnet, classification_head, num_classes, 
                      amazon_dataset, webcam_dataset, 
                      total_epochs=total_epochs, batch_size=64,
-                     num_workers=1,
+                     num_workers=1, pretrain_num_epochs=pretrain_epochs,
                      class_names=amazon_dataset.get_class_names())
     # model.setup('fit')
-    tb_logger = TensorBoardLogger('lightning_logs', version='negative_sampling')
+    tb_logger = TensorBoardLogger('lightning_logs', version='negative_sampling_wo_numerator_threshold')
 
-    trainer = pl.Trainer(accelerator='gpu', devices=[7], #strategy='ddp',
+    trainer = pl.Trainer(accelerator='gpu', devices=[4], #strategy='ddp',
                          max_epochs=total_epochs, #logger=False,
                          logger=tb_logger,
     #                      track_grad_norm=2, 
@@ -55,12 +57,12 @@ if __name__ == '__main__':
     #                     num_sanity_val_steps=0, #precision=16,
     #                      profiler='advanced',
                          callbacks=[
-                             EarlyStopping(monitor='source_val_loss', 
-                                           mode='min',
-                                           patience=50,
-                                          ),
+#                             EarlyStopping(monitor='source_val_loss', 
+#                                           mode='min',
+#                                           patience=50,
+#                                          ),
                              ModelCheckpoint(monitor='source_val_loss', 
-                                             save_last=False, 
+                                             save_last=True, 
                                              save_top_k=1,
                                              auto_insert_metric_name=True,
                                              ),
@@ -68,4 +70,9 @@ if __name__ == '__main__':
                          ]
                         )
 
-    trainer.fit(model)#, train_dataloaders=model.train_dataloader(), val_dataloaders=model.val_dataloader())
+#    ckpt_path = 'lightning_logs/lightning_logs/negative_sampling/checkpoints/last.ckpt'
+#    checkpoint = torch.load(ckpt_path, map_location='cpu')
+#    global_step_offset = checkpoint["global_step"]
+#    trainer.fit_loop.epoch_loop._batches_that_stepped = global_step_offset
+#    del checkpoint
+    trainer.fit(model)#, ckpt_path=ckpt_path)#, train_dataloaders=model.train_dataloader(), val_dataloaders=model.val_dataloader())

@@ -9,6 +9,7 @@ import numpy as np
 # from kmeans_pytorch import kmeans
 from sklearn.cluster import KMeans
 import os
+import plotly.express as px
 
 import logging
 logger = logging.getLogger(__name__)
@@ -17,8 +18,8 @@ logger = logging.getLogger(__name__)
 class UDAModel(pl.LightningModule):
     def __init__(self, feature_extractor, classification_head, n_classes, 
                        source_dataset, target_dataset, 
-                       tau=1., b=0.75, test_size=0.3, lmbda=1.4,
-                       batch_size=64, num_workers=48,
+                       tau=1., b=0.75, test_size=0.3, lmbda=1.4, explicit_negative_sampling_threshold=0.5,
+                       batch_size=64, num_workers=48, pretrain_num_epochs=500,
                        total_epochs=None, class_names=None):
         super().__init__()
         self.n_classes = n_classes
@@ -29,11 +30,13 @@ class UDAModel(pl.LightningModule):
         self.classification_loss = nn.CrossEntropyLoss()
         
         self.tau = tau
+        self.explicit_negative_sampling_threshold = explicit_negative_sampling_threshold
         self.b = b
         self.lmbda = lmbda
         self.test_size = test_size
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.pretrain_num_epochs = pretrain_num_epochs 
         
         self.total_epochs = self.check_total_epochs(total_epochs)
         self.class_names = self.check_class_names(class_names)
@@ -168,6 +171,25 @@ class UDAModel(pl.LightningModule):
         fig = px.scatter_3d(x=unique_pairs[0, :], y=unique_pairs[1, :], z=counts)
         fig.show()
         
+    def class_analysis(self, dataset):
+        labels = dataset.get_labels()
+        labels = np.array(labels)
+        real_labels = dataset.get_real_labels()
+        real_labels = np.array(real_labels)
+
+        # find unassigned labels
+        unassigned_labels = set(range(31)).difference(np.unique(labels).tolist())
+        self.logger.experiment.add_text('unassigned labels', 
+                                        str(unassigned_labels), self.current_epoch)
+
+        # for each class find the distribution of assigned classes
+        label_stats = {}
+        for i in range(31):
+            ilabels = labels[real_labels == i]
+            self.logger.experiment.add_histogram(f'class {i} assigned to:', 
+                                                 ilabels, self.current_epoch,
+                                                 bins=31)
+            
     def on_train_epoch_start(self):
         self.feature_extractor.eval()
         # Only for RemoveMismatched
@@ -179,6 +201,7 @@ class UDAModel(pl.LightningModule):
             self.target_dataset.update_labels(assigned_labels)
 #             self.target_dataset.update_labels(self.target_dataset.get_real_labels())
 #            self.visualize_pseudo_labeling()
+            self.class_analysis(self.target_dataset)
             self.log('unique labels', len(np.unique(self.target_dataset.get_labels())))
             
         self.feature_extractor.train()
@@ -199,24 +222,27 @@ class UDAModel(pl.LightningModule):
     def contrastive_step(self, anchors_batch, other_batch):
         other_x, other_y = other_batch
         
-        def helper(anchor_item, other_items):
-            sims = other_items @ anchor_item
-            # Explicit negative sampling
-            sims = sims[sims > 0.5]
-            
-            return torch.exp(sims / self.tau)
-        
         contrastive_loss = 0
         for x, y in zip(*anchors_batch):
-            same_class = self.get_same_class(other_batch, y)
-            if len(same_class) == 0:
+            same_class_indices = other_batch[1] == y
+            if not same_class_indices.any():
                 continue
-                
-            contrastive_loss -= torch.nanmean(
-                torch.log(
-                    helper(x, same_class) / torch.sum(helper(x, other_x))
-                )
-            )
+
+            positives = other_batch[0][same_class_indices]
+            negatives = other_batch[0][~same_class_indices]
+
+            positives_sims = positives @ x
+            positives_exp = torch.exp(positives_sims / self.tau)
+            negatives_sims = negatives @ x
+            negatives_sims = negatives_sims[negatives_sims > self.explicit_negative_sampling_threshold]
+            negatives_exp = torch.exp(negatives_sims / self.tau)
+
+            logit = positives_exp / (negatives_exp.sum() + positives_exp.sum())
+            log = torch.log(logit)
+            sum_over_all_positives = torch.nanmean(log)
+            
+            if not sum_over_all_positives.isnan():
+                contrastive_loss -= sum_over_all_positives
             
         return contrastive_loss
     
@@ -233,22 +259,25 @@ class UDAModel(pl.LightningModule):
         return (x1, y1), (x2, y2)
     
     def training_step(self, batch):
-        logger.debug('start of training_step')
+        #logger.debug('start of training_step')
         source_for_classification, (source_x, source_y) = self.split_batch_in_two(batch['source'])
         classification_loss = self.classification_step(source_for_classification)
 #         classification_loss = self.classification_step(batch['source'])
         
-        target_x, target_y = batch['target']
-        
-# #         logger.debug(f'training_step batch_size: {len(source_for_classification[0])}, {len(source_x)}, {len(target_x)}')
-        target_features = self.feature_extractor(target_x, 1)
-        source_features = self.feature_extractor(source_x, 0)
-        contrastive_loss = self.contrastive_step((target_features, target_y), (source_features, source_y)) \
-                         + self.contrastive_step((source_features, source_y), (target_features, target_y))
-        
-#         source_cls_x, source_cls_y = source_for_classification
-#         source_cls_features = self.feature_extractor(source_cls_x, 0)
-#         contrastive_loss = self.contrastive_step((source_cls_features, source_cls_y), (source_features, source_y))
+        if self.pretrain_num_epochs <= self.current_epoch:
+            target_x, target_y = batch['target']
+            
+    # #         logger.debug(f'training_step batch_size: {len(source_for_classification[0])}, {len(source_x)}, {len(target_x)}')
+            target_features = self.feature_extractor(target_x, 1)
+            source_features = self.feature_extractor(source_x, 0)
+            contrastive_loss = self.contrastive_step((target_features, target_y), (source_features, source_y)) \
+                             + self.contrastive_step((source_features, source_y), (target_features, target_y))
+            
+    #         source_cls_x, source_cls_y = source_for_classification
+    #         source_cls_features = self.feature_extractor(source_cls_x, 0)
+    #         contrastive_loss = self.contrastive_step((source_cls_features, source_cls_y), (source_features, source_y))
+        else:
+            contrastive_loss = -1
         train_loss = classification_loss + self.lmbda * contrastive_loss
         
         self.log_dict({
@@ -257,7 +286,7 @@ class UDAModel(pl.LightningModule):
             "train_loss": train_loss
         }, on_epoch=True, on_step=False)
         
-        logger.debug('end of training_step')
+        #logger.debug('end of training_step')
         
         return train_loss
     
@@ -272,6 +301,10 @@ class UDAModel(pl.LightningModule):
             log_dict[f'{prefix}_accuracy_{class_name}'] = accuracy[i]
             log_dict[f'{prefix}_precision_{class_name}'] = precision[i]
             log_dict[f'{prefix}_recall_{class_name}'] = recall[i]
+
+        log_dict[f'{prefix}_accuracy'] = torch.nanmean(accuracy)
+        log_dict[f'{prefix}_precision'] = torch.nanmean(precision)
+        log_dict[f'{prefix}_recall'] = torch.nanmean(recall)
             
         return log_dict
 
@@ -297,7 +330,7 @@ class UDAModel(pl.LightningModule):
             l = len(self.source_dataset)
             test_len = int(self.test_size * l)
             lens = (l - test_len, test_len)
-            logger.info(f'Train and test lengths: {lens}')
+            #logger.info(f'Train and test lengths: {lens}')
             
             self.train_source_dataset, self.val_source_dataset = \
                 random_split(self.source_dataset, lens)
