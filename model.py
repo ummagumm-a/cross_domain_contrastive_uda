@@ -4,9 +4,7 @@ from torch.utils.data import DataLoader, random_split
 from torch.optim.lr_scheduler import LambdaLR
 import pytorch_lightning as pl
 import torchmetrics
-# from info_nce import InfoNCE
 import numpy as np
-# from kmeans_pytorch import kmeans
 from sklearn.cluster import KMeans
 import os
 import plotly.express as px
@@ -18,8 +16,10 @@ logger = logging.getLogger(__name__)
 class UDAModel(pl.LightningModule):
     def __init__(self, feature_extractor, classification_head, n_classes, 
                        source_dataset, target_dataset, 
-                       tau=1., b=0.75, test_size=0.3, lmbda=1.4, explicit_negative_sampling_threshold=0.5,
+                       tau=1., b=0.75, test_size=0.3, lmbda=1.4, 
+                       explicit_negative_sampling_threshold=0.5,
                        batch_size=64, num_workers=48, pretrain_num_epochs=0,
+                       negative_sampling=None,
                        total_epochs=None, class_names=None):
         super().__init__()
         self.n_classes = n_classes
@@ -35,7 +35,8 @@ class UDAModel(pl.LightningModule):
         self.test_size = test_size
         self.batch_size = batch_size
         self.num_workers = num_workers
-        self.pretrain_num_epochs = pretrain_num_epochs 
+        self.pretrain_num_epochs = pretrain_num_epochs
+        self.negative_sampling = self.check_negative_sampling(negative_sampling)
         
         self.total_epochs = self.check_total_epochs(total_epochs)
         self.class_names = self.check_class_names(class_names)
@@ -54,6 +55,17 @@ class UDAModel(pl.LightningModule):
             class_names = np.arange(self.n_classes)
             
         return class_names
+    
+    def check_negative_sampling(self, negative_sampling):
+        """
+        Checks correctness of 'negative_sampling' parameter.
+        """
+        
+        negative_sampling_options = [None, 'soft', 'hard']
+        if negative_sampling in negative_sampling_options:
+            return negative_sampling
+        else:
+            raise Exception(f"Wrong negative sampling option {negative_sampling}. Available options are: {negative_sampling_options}.")
     
     def check_total_epochs(self, total_epochs):
         if total_epochs is None:
@@ -293,6 +305,20 @@ class UDAModel(pl.LightningModule):
                 
         else:
             raise Exception(f"Wrong anchor type: {anchor_type}")
+            
+    def _filter_negative_samples(self, negatives_sims):
+        """
+        Filter out negative samples according to negative sampling strategy and threshold.
+        """
+        
+        if self.negative_sampling is None:
+            return negatives_sims
+        elif self.negative_sampling == 'soft':
+            return negatives_sims[negatives_sims < self.explicit_negative_sampling_threshold]
+        elif self.negative_sampling == 'hard':
+            return negatives_sims[negatives_sims > self.explicit_negative_sampling_threshold]
+        else:
+            raise Exception(Exception(f"Wrong negative sampling option {negative_sampling}. Available options are: {negative_sampling_options}."))
     
     def contrastive_step(self, anchors_batch, other_batch, anchor_type):
         other_x, other_y, other_y_real = other_batch
@@ -313,7 +339,9 @@ class UDAModel(pl.LightningModule):
                                           (negatives_sims, other_y[~same_class_indices], other_y_real[~same_class_indices]),
                                           (positives_sims, other_y[same_class_indices], other_y_real[same_class_indices]),
                                           anchor_type)
-            negatives_sims = negatives_sims[negatives_sims > self.explicit_negative_sampling_threshold]
+            
+            # Explicit negative sampling
+            negatives_sims = self._filter_negative_samples(negatives_sims)
             negatives_exp = torch.exp(negatives_sims / self.tau)
 
             logit = positives_exp / (negatives_exp.sum() + positives_exp.sum())

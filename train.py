@@ -23,6 +23,7 @@ if __name__ == '__main__':
     webcam_dataset = OfficeDataset('webcam', transform=transform)
     num_classes = 31
     negative_sampling_threshold = 0.5
+    negative_sampling_strategy = 'hard'
     # for Office
     # b = 0.75
     # for Visda
@@ -38,12 +39,18 @@ if __name__ == '__main__':
                      total_epochs=total_epochs, batch_size=64,
                      num_workers=1, pretrain_num_epochs=pretrain_epochs,
                      explicit_negative_sampling_threshold=negative_sampling_threshold,
+                     negative_sampling=negative_sampling_strategy,
                      class_names=amazon_dataset.get_class_names())
 
-    tb_logger = TensorBoardLogger('lightning_logs', version=f'ns_analisys_{negative_sampling_threshold}')
+    if negative_sampling_strategy is None:
+        version = 'baseline'
+    else:
+        version = f'ns_analisys_{negative_sampling_strategy}_{negative_sampling_threshold}'
+
+    tb_logger = TensorBoardLogger('lightning_logs', version=version)
 
     trainer = pl.Trainer(accelerator='gpu', devices=[4],
-                         max_epochs=total_epochs,
+                         max_epochs=2,#total_epochs,
                          logger=tb_logger,
                          track_grad_norm=2, 
                          gradient_clip_val=1.5,
