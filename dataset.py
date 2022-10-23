@@ -88,7 +88,8 @@ class OfficeDataset(Dataset):
         with Image.open(pair[0]) as img:
             img = self.transform(img)
 
-        return img, torch.tensor(pair[1], dtype=torch.long)
+        return img, torch.tensor(pair[1], dtype=torch.long), \
+               torch.tensor(self.real_labels[i], dtype=torch.long)
     
 class RemoveMismatchedAdapter(Dataset):
     def __init__(self, dataset):
