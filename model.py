@@ -25,7 +25,6 @@ class UDAModel(pl.LightningModule):
         self.n_classes = n_classes
         # The last layer should be smth giving (N, out_features)
         self.feature_extractor = feature_extractor
-        # What should it be? How much layers?
         self.classification_head = classification_head
         self.classification_loss = nn.CrossEntropyLoss()
         
@@ -48,9 +47,6 @@ class UDAModel(pl.LightningModule):
         self.precision_metric = torchmetrics.Precision(num_classes=n_classes, average=None)
         self.recall_metric = torchmetrics.Recall(num_classes=n_classes, average=None)
         
-#         self.clusterizer = MiniBatchKMeans(n_clusters=self.n_classes, 
-#                                            batch_size=self.batch_size,
-#                                            n_init=1)
         self.clusterizer = KMeans(n_clusters=self.n_classes, n_init=1)
         
     def check_class_names(self, class_names):
@@ -122,17 +118,6 @@ class UDAModel(pl.LightningModule):
 
         self.clusterizer.set_params(init=initial_centers.cpu())
 
-#     def fit_clusterizer(self):
-#         dataloader = self.dataloader_target_for_clustering()
-
-#         for x, _ in dataloader:
-#             x = x.to(self.device)
-#             features = self.feature_extractor(x, 1)
-#             features = features.cpu().numpy()
-#             self.clusterizer.partial_fit(features)
-
-#         return self.clusterizer.cluster_centers_
-
     def fit_clusterizer(self):
         dataloader = self.dataloader_target_for_clustering()
         all_features = []
@@ -192,14 +177,11 @@ class UDAModel(pl.LightningModule):
             
     def on_train_epoch_start(self):
         self.feature_extractor.eval()
-        # Only for RemoveMismatched
-#        self.target_dataset.reset()
         with torch.no_grad():
             self.calculate_class_centers()
             self.fit_clusterizer()
             assigned_labels = self.assign_labels()
             self.target_dataset.update_labels(assigned_labels)
-#             self.target_dataset.update_labels(self.target_dataset.get_real_labels())
 #            self.visualize_pseudo_labeling()
             self.class_analysis(self.target_dataset)
             self.log('unique labels', len(np.unique(self.target_dataset.get_labels())))
@@ -227,36 +209,6 @@ class UDAModel(pl.LightningModule):
             x, y, _ = anchor
             neg_x, _, neg_y_real = negatives
             pos_x, _, pos_y_real = positives
-#             neg_y_real_above = neg_y_real[negatives_mask]
-#             neg_y_real_below = neg_y_real[~negatives_mask]
-#             # amount of remaining samples
-#             num_above = len(neg_y_real_above)
-#             # amount of left-out samples
-#             num_below = len(neg_y_real_below)
-#             # amount of positive samples
-#             num_pos = len(pos_y_real)
-#             # for hard negatives - fraction of samples of the same class as anchor incorrectly assigned as negative
-#             false_negative_ratio_above = (neg_y_real_above == y).sum() / num_above
-#             # for soft negatives - fraction of samples of the same class as anchor incorrectly assigned as negative
-#             false_negative_ratio_below = (neg_y_real_below == y).sum() / num_below
-#             # for positives - fraction of samples of the different class as anchor incorrectly assigned as positive
-#             false_negative_ratio_positives = (pos_y_real != y).sum() / num_pos
-            
-#             # log fractions to tensorboard
-#             self.logger.experiment.add_scalars('source_anchor; false negative ratio', 
-#                                               {
-#                                                   'above': false_negative_ratio_above,
-#                                                   'below': false_negative_ratio_below,
-#                                                   'positives': false_negative_ratio_positives
-#                                               }, self.global_step)
-            
-#             # log amounts to tensorboard
-#             self.logger.experiment.add_scalars('source_anchor; num_samples', 
-#                                               {
-#                                                   'above': num_above,
-#                                                   'below': num_below,
-#                                                   'positives': num_pos
-#                                               }, self.global_step)
                 
             false_negatives_sims = neg_x[neg_y_real == y]
             if len(false_negatives_sims) != 0:
@@ -302,36 +254,6 @@ class UDAModel(pl.LightningModule):
             x, _, y_real = anchor
             neg_x, neg_y, _ = negatives
             pos_x, pos_y, _ = positives
-#             neg_y_above = neg_y[negatives_mask]
-#             neg_y_below = neg_y[~negatives_mask]
-#             # amount of remaining samples
-#             num_above = len(neg_y_above)
-#             # amount of left-out samples
-#             num_below = len(neg_y_below)
-#             # amount of positive samples
-#             num_pos = len(pos_y)
-#             # for hard negatives - fraction of samples of the same class as anchor incorrectly assigned as negative
-#             false_negative_ratio_above = (neg_y_above == y_real).sum() / num_above
-#             # for soft negatives - fraction of samples of the same class as anchor incorrectly assigned as negative
-#             false_negative_ratio_below = (neg_y_below == y_real).sum() / num_below
-#             # for positives - fraction of samples of the different class as anchor incorrectly assigned as positive
-#             false_negative_ratio_positives = (pos_y != y_real).sum() / num_pos
-            
-#             # log fractions to tensorboard
-#             self.logger.experiment.add_scalars('target_anchor; false negative ratio', 
-#                                               {
-#                                                   'above': false_negative_ratio_above,
-#                                                   'below': false_negative_ratio_below,
-#                                                   'positives': false_negative_ratio_positives
-#                                               }, self.global_step)
-            
-#             # log amounts to tensorboard
-#             self.logger.experiment.add_scalars('target_anchor; num_samples', 
-#                                               {
-#                                                   'above': num_above,
-#                                                   'below': num_below,
-#                                                   'positives': num_pos
-#                                               }, self.global_step)
             
             false_negatives_sims = neg_x[neg_y == y_real]
             if len(false_negatives_sims) != 0:
@@ -418,15 +340,12 @@ class UDAModel(pl.LightningModule):
         return (x1, y1, y_real1), (x2, y2, y_real2)
     
     def training_step(self, batch):
-        #logger.debug('start of training_step')
         source_for_classification, (source_x, source_y, source_y_real) = self.split_batch_in_two(batch['source'])
         classification_loss = self.classification_step(source_for_classification)
-#         classification_loss = self.classification_step(batch['source'])
         
         if self.pretrain_num_epochs <= self.current_epoch:
             target_x, target_y, target_y_real = batch['target']
-            
-    # #         logger.debug(f'training_step batch_size: {len(source_for_classification[0])}, {len(source_x)}, {len(target_x)}')
+
             target_features = self.feature_extractor(target_x, 1)
             source_features = self.feature_extractor(source_x, 0)
             contrastive_target_anchor = self.contrastive_step(
@@ -440,10 +359,7 @@ class UDAModel(pl.LightningModule):
                 'source'
             )
             contrastive_loss = contrastive_target_anchor + contrastive_source_anchor
-            
-    #         source_cls_x, source_cls_y = source_for_classification
-    #         source_cls_features = self.feature_extractor(source_cls_x, 0)
-    #         contrastive_loss = self.contrastive_step((source_cls_features, source_cls_y), (source_features, source_y))
+
         else:
             contrastive_loss = -1
         train_loss = classification_loss + self.lmbda * contrastive_loss
@@ -453,9 +369,7 @@ class UDAModel(pl.LightningModule):
             "contrastive_loss": contrastive_loss,
             "train_loss": train_loss
         }, on_epoch=True, on_step=False)
-        
-        #logger.debug('end of training_step')
-        
+                
         return train_loss
     
     def val_metrics(self, pred, y, prefix):
@@ -498,7 +412,6 @@ class UDAModel(pl.LightningModule):
             l = len(self.source_dataset)
             test_len = int(self.test_size * l)
             lens = (l - test_len, test_len)
-            #logger.info(f'Train and test lengths: {lens}')
             
             self.train_source_dataset, self.val_source_dataset = \
                 random_split(self.source_dataset, lens)
