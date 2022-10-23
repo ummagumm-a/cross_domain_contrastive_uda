@@ -11,11 +11,9 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks import ModelCheckpoint, DeviceStatsMonitor, StochasticWeightAveraging
 import torch
 import logging
-#import torch.multiprocessing
-#torch.multiprocessing.set_sharing_strategy('file_system')
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
     pl.seed_everything(41)
 
     total_epochs = 2500
@@ -24,6 +22,7 @@ if __name__ == '__main__':
     amazon_dataset = OfficeDataset('amazon', transform=transform)
     webcam_dataset = OfficeDataset('webcam', transform=transform)
     num_classes = 31
+    negative_sampling_threshold = 0.5
     # for Office
     # b = 0.75
     # for Visda
@@ -31,42 +30,31 @@ if __name__ == '__main__':
 
     resnet = resnet50dsbn(pretrained=True)
     resnet.fc2 = FeatureNormL2()
-    # resnet.fc2 = nn.Identity()
     resnet.out_features = 256
     classification_head = nn.Linear(resnet.out_features, num_classes)
-
-    # model = UDAModel(resnet, 3, 
-    #                  (source_df.to_numpy()[:, :-1], source_df.to_numpy()[:, -1]), 
-    #                  target_df.to_numpy()[:, :-1], total_epochs=total_epochs)
+    
     model = UDAModel(resnet, classification_head, num_classes, 
                      amazon_dataset, webcam_dataset, 
                      total_epochs=total_epochs, batch_size=64,
                      num_workers=1, pretrain_num_epochs=pretrain_epochs,
+                     explicit_negative_sampling_threshold=negative_sampling_threshold,
                      class_names=amazon_dataset.get_class_names())
-    # model.setup('fit')
-    tb_logger = TensorBoardLogger('lightning_logs', version='negative_sampling_wo_numerator_threshold')
 
-    trainer = pl.Trainer(accelerator='gpu', devices=[4], #strategy='ddp',
-                         max_epochs=total_epochs, #logger=False,
+    tb_logger = TensorBoardLogger('lightning_logs', version=f'ns_analisys_{negative_sampling_threshold}')
+
+    trainer = pl.Trainer(accelerator='gpu', devices=[4],
+                         max_epochs=total_epochs,
                          logger=tb_logger,
-    #                      track_grad_norm=2, 
+                         track_grad_norm=2, 
                          gradient_clip_val=1.5,
-                         log_every_n_steps=10, #deterministic=True,
+                         log_every_n_steps=16,
                          multiple_trainloader_mode='max_size_cycle',
-    #                      limit_train_batches=5, limit_val_batches=5,
-    #                     num_sanity_val_steps=0, #precision=16,
-    #                      profiler='advanced',
                          callbacks=[
-#                             EarlyStopping(monitor='source_val_loss', 
-#                                           mode='min',
-#                                           patience=50,
-#                                          ),
                              ModelCheckpoint(monitor='source_val_loss', 
                                              save_last=True, 
                                              save_top_k=1,
                                              auto_insert_metric_name=True,
                                              ),
-    #                          StochasticWeightAveraging(swa_lrs=1e-2),
                          ]
                         )
 
@@ -75,4 +63,5 @@ if __name__ == '__main__':
 #    global_step_offset = checkpoint["global_step"]
 #    trainer.fit_loop.epoch_loop._batches_that_stepped = global_step_offset
 #    del checkpoint
-    trainer.fit(model)#, ckpt_path=ckpt_path)#, train_dataloaders=model.train_dataloader(), val_dataloaders=model.val_dataloader())
+#    trainer.fit(model, ckpt_path=ckpt_path)
+    trainer.fit(model)
