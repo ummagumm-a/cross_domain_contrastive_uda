@@ -6,6 +6,7 @@ import pytorch_lightning as pl
 import torchmetrics
 import numpy as np
 from sklearn.cluster import KMeans
+#from spherecluster import SphericalKMeans
 import os
 import plotly.express as px
 
@@ -19,7 +20,7 @@ class UDAModel(pl.LightningModule):
                        tau=1., b=0.75, test_size=0.3, lmbda=1.4, 
                        explicit_negative_sampling_threshold=0.5,
                        batch_size=64, num_workers=48, pretrain_num_epochs=0,
-                       negative_sampling=None,
+                       negative_sampling=None, remove_mismatched=False,
                        total_epochs=None, class_names=None):
         super().__init__()
         self.n_classes = n_classes
@@ -37,6 +38,7 @@ class UDAModel(pl.LightningModule):
         self.num_workers = num_workers
         self.pretrain_num_epochs = pretrain_num_epochs
         self.negative_sampling = self.check_negative_sampling(negative_sampling)
+        self.remove_mismatched = remove_mismatched
         
         self.total_epochs = self.check_total_epochs(total_epochs)
         self.class_names = self.check_class_names(class_names)
@@ -45,10 +47,11 @@ class UDAModel(pl.LightningModule):
         self.target_dataset = target_dataset
         
         self.accuracy_metric = torchmetrics.Accuracy(num_classes=n_classes, average=None)
-        self.precision_metric = torchmetrics.Precision(num_classes=n_classes, average=None)
-        self.recall_metric = torchmetrics.Recall(num_classes=n_classes, average=None)
+        #self.precision_metric = torchmetrics.Precision(num_classes=n_classes, average=None)
+        #self.recall_metric = torchmetrics.Recall(num_classes=n_classes, average=None)
         
         self.clusterizer = KMeans(n_clusters=self.n_classes, n_init=1)
+        # self.clusterizer = SphericalKMeans(n_clusters=self.n_classes)
         
     def check_class_names(self, class_names):
         if class_names is None:
@@ -173,22 +176,29 @@ class UDAModel(pl.LightningModule):
         labels = np.array(labels)
         real_labels = dataset.get_real_labels()
         real_labels = np.array(real_labels)
+        self.logger.experiment.add_scalar(f'Mislabeled fraction', np.sum(labels != real_labels) / len(labels), self.current_epoch)
 
         # find unassigned labels
-        unassigned_labels = set(range(31)).difference(np.unique(labels).tolist())
-        self.logger.experiment.add_text('unassigned labels', 
-                                        str(unassigned_labels), self.current_epoch)
+        # unassigned_labels = set(range(31)).difference(np.unique(labels).tolist())
+        # self.logger.experiment.add_text('unassigned labels', 
+        #                                str(unassigned_labels), self.current_epoch)
 
         # for each class find the distribution of assigned classes
-        label_stats = {}
-        for i in range(31):
-            ilabels = labels[real_labels == i]
-            self.logger.experiment.add_histogram(f'class {i} assigned to:', 
-                                                 ilabels, self.current_epoch,
-                                                 bins=31)
+        # label_stats = {}
+        # for i in range(31):
+        #     ilabels = labels[real_labels == i]
+        #     if len(ilabels) == 0:
+        #         continue
+        #     self.logger.experiment.add_histogram(f'class {i} assigned to:', 
+        #                                          ilabels, self.current_epoch,
+        #                                          bins=31)
+        #     self.logger.experiment.add_scalar(f'Class {i} mislabeled fraction', (ilabels != i).sum() / len(ilabels), self.current_epoch)
             
     def on_train_epoch_start(self):
         self.feature_extractor.eval()
+        if self.remove_mismatched:
+            self.target_dataset.reset()
+
         with torch.no_grad():
             self.calculate_class_centers()
             self.fit_clusterizer()
@@ -224,39 +234,63 @@ class UDAModel(pl.LightningModule):
                 
             false_negatives_sims = neg_x[neg_y_real == y]
             if len(false_negatives_sims) != 0:
-                self.logger.experiment.add_histogram('source_anchor, false negative sims', 
-                                                     false_negatives_sims, 
-                                                     self.global_step)
-                self.logger.experiment.add_histogram(f'source_anchor, false negative sims, anchor {y}', 
-                                                     false_negatives_sims, 
-                                                     self.global_step)
+                #self.logger.experiment.add_histogram('source_anchor, false negative sims', 
+                #                                     false_negatives_sims, 
+                #                                     self.global_step)
+                self.logger.experiment.add_scalar('source_anchor, false negative sims, max', 
+                                                  false_negatives_sims.max(), 
+                                                  self.global_step)
+                self.logger.experiment.add_scalar('source_anchor, false negative sims, mean', 
+                                                  false_negatives_sims.mean(), 
+                                                  self.global_step)
+                #self.logger.experiment.add_histogram(f'source_anchor, false negative sims, anchor {y}', 
+                #                                     false_negatives_sims, 
+                #                                     self.global_step)
             
             true_negatives_sims = neg_x[neg_y_real != y]
             if len(true_negatives_sims) != 0:
-                self.logger.experiment.add_histogram('source_anchor, true negative sims', 
-                                                     true_negatives_sims, 
-                                                     self.global_step)
-                self.logger.experiment.add_histogram(f'source_anchor, true negative sims, anchor {y}', 
-                                                     true_negatives_sims, 
-                                                     self.global_step)
+                #self.logger.experiment.add_histogram('source_anchor, true negative sims', 
+                #                                     true_negatives_sims, 
+                #                                     self.global_step)
+                self.logger.experiment.add_scalar('source_anchor, true negative sims, max', 
+                                                  true_negatives_sims.max(), 
+                                                  self.global_step)
+                self.logger.experiment.add_scalar('source_anchor, true negative sims, mean', 
+                                                  true_negatives_sims.mean(), 
+                                                  self.global_step)
+                #self.logger.experiment.add_histogram(f'source_anchor, true negative sims, anchor {y}', 
+                #                                     true_negatives_sims, 
+                #                                     self.global_step)
                 
             false_positives_sims = pos_x[pos_y_real != y]
             if len(false_positives_sims) != 0:
-                self.logger.experiment.add_histogram('source_anchor, false positive sims', 
-                                                     false_positives_sims, 
-                                                     self.global_step)
-                self.logger.experiment.add_histogram(f'source_anchor, false positive sims, anchor {y}', 
-                                                     false_positives_sims, 
-                                                     self.global_step)
+                #self.logger.experiment.add_histogram('source_anchor, false positive sims', 
+                #                                     false_positives_sims, 
+                #                                     self.global_step)
+                self.logger.experiment.add_scalar('source_anchor, false positive sims, max', 
+                                                  false_positives_sims.max(), 
+                                                  self.global_step)
+                self.logger.experiment.add_scalar('source_anchor, false positive sims, mean', 
+                                                  false_positives_sims.mean(), 
+                                                  self.global_step)
+                #self.logger.experiment.add_histogram(f'source_anchor, false positive sims, anchor {y}', 
+                #                                     false_positives_sims, 
+                #                                     self.global_step)
             
             true_positives_sims = pos_x[pos_y_real == y]
             if len(true_positives_sims) != 0:
-                self.logger.experiment.add_histogram('source_anchor, true positive sims', 
-                                                     true_positives_sims, 
-                                                     self.global_step)
-                self.logger.experiment.add_histogram(f'source_anchor, true positive sims, anchor {y}', 
-                                                     true_positives_sims, 
-                                                     self.global_step)
+                #self.logger.experiment.add_histogram('source_anchor, true positive sims', 
+                #                                     true_positives_sims, 
+                #                                     self.global_step)
+                self.logger.experiment.add_scalar('source_anchor, true positive sims, max', 
+                                                  true_positives_sims.max(), 
+                                                  self.global_step)
+                self.logger.experiment.add_scalar('source_anchor, true positive sims, mean', 
+                                                  true_positives_sims.mean(), 
+                                                  self.global_step)
+                #self.logger.experiment.add_histogram(f'source_anchor, true positive sims, anchor {y}', 
+                #                                     true_positives_sims, 
+                #                                     self.global_step)
             
             
         elif anchor_type == 'target':
@@ -269,39 +303,63 @@ class UDAModel(pl.LightningModule):
             
             false_negatives_sims = neg_x[neg_y == y_real]
             if len(false_negatives_sims) != 0:
-                self.logger.experiment.add_histogram('target_anchor, false negative sims', 
-                                                     false_negatives_sims, 
-                                                     self.global_step)
-                self.logger.experiment.add_histogram(f'target_anchor, false negative sims, anchor {y_real}', 
-                                                     false_negatives_sims, 
-                                                     self.global_step)
+                #self.logger.experiment.add_histogram('target_anchor, false negative sims', 
+                #                                     false_negatives_sims, 
+                #                                     self.global_step)
+                self.logger.experiment.add_scalar('target_anchor, false negative sims, max', 
+                                                  false_negatives_sims.max(), 
+                                                  self.global_step)
+                self.logger.experiment.add_scalar('target_anchor, false negative sims, mean', 
+                                                  false_negatives_sims.mean(), 
+                                                  self.global_step)
+                #self.logger.experiment.add_histogram(f'target_anchor, false negative sims, anchor {y_real}', 
+                #                                     false_negatives_sims, 
+                #                                     self.global_step)
             
             true_negatives_sims = neg_x[neg_y != y_real]
             if len(true_negatives_sims) != 0:
-                self.logger.experiment.add_histogram('target_anchor, true negative sims', 
-                                                     true_negatives_sims, 
-                                                     self.global_step)
-                self.logger.experiment.add_histogram(f'target_anchor, true negative sims, anchor {y_real}', 
-                                                     true_negatives_sims, 
-                                                     self.global_step)
+                #self.logger.experiment.add_histogram('target_anchor, true negative sims', 
+                #                                     true_negatives_sims, 
+                #                                     self.global_step)
+                self.logger.experiment.add_scalar('target_anchor, true negative sims, max', 
+                                                  true_negatives_sims.max(), 
+                                                  self.global_step)
+                self.logger.experiment.add_scalar('target_anchor, true negative sims, mean', 
+                                                  true_negatives_sims.mean(), 
+                                                  self.global_step)
+                #self.logger.experiment.add_histogram(f'target_anchor, true negative sims, anchor {y_real}', 
+                #                                     true_negatives_sims, 
+                #                                     self.global_step)
                 
             false_positives_sims = pos_x[pos_y != y_real]
             if len(false_positives_sims) != 0:
-                self.logger.experiment.add_histogram('target_anchor, false positive sims', 
-                                                     false_positives_sims, 
-                                                     self.global_step)
-                self.logger.experiment.add_histogram(f'target_anchor, false positive sims, anchor {y_real}', 
-                                                     false_positives_sims, 
-                                                     self.global_step)
+                #self.logger.experiment.add_histogram('target_anchor, false positive sims', 
+                #                                     false_positives_sims, 
+                #                                     self.global_step)
+                self.logger.experiment.add_scalar('target_anchor, false positive sims, max', 
+                                                  false_positives_sims.max(), 
+                                                  self.global_step)
+                self.logger.experiment.add_scalar('target_anchor, false positive sims, mean', 
+                                                  false_positives_sims.mean(), 
+                                                  self.global_step)
+                #self.logger.experiment.add_histogram(f'target_anchor, false positive sims, anchor {y_real}', 
+                #                                     false_positives_sims, 
+                #                                     self.global_step)
             
             true_positives_sims = pos_x[pos_y == y_real]
             if len(true_positives_sims) != 0:
-                self.logger.experiment.add_histogram('target_anchor, true positive sims', 
-                                                     true_positives_sims, 
-                                                     self.global_step)
-                self.logger.experiment.add_histogram(f'target_anchor, true positive sims, anchor {y_real}', 
-                                                     true_positives_sims, 
-                                                     self.global_step)
+                #self.logger.experiment.add_histogram('target_anchor, true positive sims', 
+                #                                     true_positives_sims, 
+                #                                     self.global_step)
+                self.logger.experiment.add_scalar('target_anchor, true positive sims, max', 
+                                                  true_positives_sims.max(), 
+                                                  self.global_step)
+                self.logger.experiment.add_scalar('target_anchor, true positive sims, mean', 
+                                                  true_positives_sims.mean(), 
+                                                  self.global_step)
+                #self.logger.experiment.add_histogram(f'target_anchor, true positive sims, anchor {y_real}', 
+                #                                     true_positives_sims, 
+                #                                     self.global_step)
                 
         else:
             raise Exception(f"Wrong anchor type: {anchor_type}")
@@ -335,10 +393,10 @@ class UDAModel(pl.LightningModule):
             positives_sims = positives @ x
             positives_exp = torch.exp(positives_sims / self.tau)
             negatives_sims = negatives @ x
-            self.analyze_negative_samples((x, y, y_real), 
-                                          (negatives_sims, other_y[~same_class_indices], other_y_real[~same_class_indices]),
-                                          (positives_sims, other_y[same_class_indices], other_y_real[same_class_indices]),
-                                          anchor_type)
+#             self.analyze_negative_samples((x, y, y_real), 
+#                                           (negatives_sims, other_y[~same_class_indices], other_y_real[~same_class_indices]),
+#                                           (positives_sims, other_y[same_class_indices], other_y_real[same_class_indices]),
+#                                           anchor_type)
             
             # Explicit negative sampling
             negatives_sims = self._filter_negative_samples(negatives_sims)
@@ -403,20 +461,24 @@ class UDAModel(pl.LightningModule):
     def val_metrics(self, pred, y, prefix):
         # TODO: for optimization may need to first calculate tp, tn, fp, fn
         accuracy = self.accuracy_metric(pred, y)
-        precision = self.precision_metric(pred, y)
-        recall = self.recall_metric(pred, y)
+        #precision = self.precision_metric(pred, y)
+        #recall = self.recall_metric(pred, y)
         
         log_dict = {}
-        for i, class_name in enumerate(self.class_names):
-            log_dict[f'{prefix}_accuracy_{class_name}'] = accuracy[i]
-            log_dict[f'{prefix}_precision_{class_name}'] = precision[i]
-            log_dict[f'{prefix}_recall_{class_name}'] = recall[i]
+        # for i, class_name in enumerate(self.class_names):
+        #     log_dict[f'{prefix}_accuracy_{class_name}'] = accuracy[i]
+        #     log_dict[f'{prefix}_precision_{class_name}'] = precision[i]
+        #     log_dict[f'{prefix}_recall_{class_name}'] = recall[i]
 
         log_dict[f'{prefix}_accuracy'] = torch.nanmean(accuracy)
-        log_dict[f'{prefix}_precision'] = torch.nanmean(precision)
-        log_dict[f'{prefix}_recall'] = torch.nanmean(recall)
+        #log_dict[f'{prefix}_precision'] = torch.nanmean(precision)
+        #log_dict[f'{prefix}_recall'] = torch.nanmean(recall)
             
         return log_dict
+
+    def on_validation_start(self):
+        if self.remove_mismatched:
+            self.target_dataset.reset()
 
     def validation_step(self, batch, batch_idx, dataloader_idx):
         x, y, y_real = batch
@@ -427,7 +489,7 @@ class UDAModel(pl.LightningModule):
             self.log("source_val_loss", loss, on_epoch=True, on_step=False, add_dataloader_idx=False)
             self.log_dict(self.val_metrics(pred, y, 'source'), on_epoch=True, on_step=False, add_dataloader_idx=False)
         elif dataloader_idx == 1:
-            pred = self(x, 0)
+            pred = self(x, 1)
             loss = self.classification_loss(pred, y_real)
 
             self.log("target_val_loss", loss, on_epoch=True, on_step=False, add_dataloader_idx=False)
