@@ -1,0 +1,8 @@
+#!/bin/bash
+
+data_dir="datasets/"
+wget https://wjdcloud.blob.core.windows.net/dataset/OFFICE31.zip -P $data_dir
+unzip $data_dir/OFFICE31.zip -d $data_dir
+python office_split.py $data_dir
+rm $data_dir/OFFICE31.zip
+
