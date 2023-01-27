@@ -5,6 +5,9 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 import shutil
 
+
+RANDOM_SEED = 42
+
 def split_office31(data_dir='datasets',
                    office_dir='OFFICE31',
                    test_size=0.25):
@@ -23,6 +26,8 @@ def split_office31(data_dir='datasets',
     # Domain-class groupings
     domain_classes = jpg_paths.groupby(by=[0, 1]).size()
     
+    # To ensure that each domain-class pair is split in an even proportion,
+    # i.e. there is always test_size% of samples in val for each class.
     for i in domain_classes.keys():
         subdirs = os.sep.join(i)
         path = os.path.join(office_dir, subdirs)
@@ -33,7 +38,7 @@ def split_office31(data_dir='datasets',
         os.makedirs(dest_val_path, exist_ok=True)
 
         jpgs = os.listdir(path)
-        train_jpgs, val_jpgs = train_test_split(jpgs, test_size=test_size)
+        train_jpgs, val_jpgs = train_test_split(jpgs, test_size=test_size, random_state=RANDOM_SEED)
 
         for train_jpg in train_jpgs:
             shutil.copy(os.path.join(path, train_jpg), dest_train_path)
