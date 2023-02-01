@@ -6,6 +6,8 @@ import pytorch_lightning as pl
 import torchmetrics
 import numpy as np
 from sklearn.cluster import KMeans
+#from sklearn.utils.validation import check_is_fitted
+#from sklearn.exceptions import NotFittedError
 #from spherecluster import SphericalKMeans
 import os
 import plotly.express as px
@@ -43,8 +45,8 @@ class UDAModel(pl.LightningModule):
         self.total_epochs = self.check_total_epochs(total_epochs)
         self.class_names = self.check_class_names(class_names)
         
-        self.source_dataset = source_dataset
-        self.target_dataset = target_dataset
+        self.train_source_dataset, self.val_source_dataset = source_dataset
+        self.train_target_dataset, self.val_target_dataset = target_dataset
         
         self.accuracy_metric = torchmetrics.Accuracy(num_classes=n_classes, average=None)
         #self.precision_metric = torchmetrics.Precision(num_classes=n_classes, average=None)
@@ -145,8 +147,8 @@ class UDAModel(pl.LightningModule):
         
         self.clusterizer.fit(all_features)
     
-    def assign_labels(self):
-        dataloader = self.dataloader_target_for_clustering()
+    def assign_labels(self, dataloader):
+#        dataloader = self.dataloader_target_for_clustering()
 
         collected_labels = []
         for x, _, _ in dataloader:
@@ -161,9 +163,9 @@ class UDAModel(pl.LightningModule):
     
     def visualize_pseudo_labeling(self):
         real_labels, labels = [], []
-        for i in range(len(self.target_dataset)):
-            real_labels.append(self.target_dataset.get_real_labels()[i])
-            labels.append(self.target_dataset.get_labels()[i])
+        for i in range(len(self.train_target_dataset)):
+            real_labels.append(self.train_target_dataset.get_real_labels()[i])
+            labels.append(self.train_target_dataset.get_labels()[i])
 
         real_labels, labels = np.array(real_labels), np.array(labels)
         pairs = np.vstack((real_labels, labels))
@@ -197,16 +199,16 @@ class UDAModel(pl.LightningModule):
     def on_train_epoch_start(self):
         self.feature_extractor.eval()
         if self.remove_mismatched:
-            self.target_dataset.reset()
+            self.train_target_dataset.reset()
 
         with torch.no_grad():
             self.calculate_class_centers()
             self.fit_clusterizer()
-            assigned_labels = self.assign_labels()
-            self.target_dataset.update_labels(assigned_labels)
+            assigned_labels = self.assign_labels(self.dataloader_target_for_clustering())
+            self.train_target_dataset.update_labels(assigned_labels)
 #            self.visualize_pseudo_labeling()
-            self.class_analysis(self.target_dataset)
-            self.log('unique labels', len(np.unique(self.target_dataset.get_labels())))
+            self.class_analysis(self.train_target_dataset)
+            self.log('unique labels', len(np.unique(self.train_target_dataset.get_labels())))
             
         self.feature_extractor.train()
     
@@ -376,7 +378,7 @@ class UDAModel(pl.LightningModule):
         elif self.negative_sampling == 'hard':
             return negatives_sims[negatives_sims > self.explicit_negative_sampling_threshold]
         else:
-            raise Exception(Exception(f"Wrong negative sampling option {negative_sampling}. Available options are: {negative_sampling_options}."))
+            raise Exception(f"Wrong negative sampling option {negative_sampling}. Available options are: {negative_sampling_options}.")
     
     def contrastive_step(self, anchors_batch, other_batch, anchor_type):
         other_x, other_y, other_y_real = other_batch
@@ -476,10 +478,6 @@ class UDAModel(pl.LightningModule):
             
         return log_dict
 
-    def on_validation_start(self):
-        if self.remove_mismatched:
-            self.target_dataset.reset()
-
     def validation_step(self, batch, batch_idx, dataloader_idx):
         x, y, y_real = batch
         if dataloader_idx == 0:
@@ -497,17 +495,8 @@ class UDAModel(pl.LightningModule):
         else:
             raise Exception(f'Weird dataloader_idx: {dataloader_idx}')
         
-    def setup(self, stage):
-        if stage == 'fit':
-            l = len(self.source_dataset)
-            test_len = int(self.test_size * l)
-            lens = (l - test_len, test_len)
-            
-            self.train_source_dataset, self.val_source_dataset = \
-                random_split(self.source_dataset, lens)
-            
     def dataloader_target_for_clustering(self):
-        return DataLoader(self.target_dataset,
+        return DataLoader(self.train_target_dataset,
                           batch_size=self.batch_size,
                           pin_memory=True,
                           shuffle=False,
@@ -529,14 +518,14 @@ class UDAModel(pl.LightningModule):
                                        shuffle=True,
                                        num_workers=self.num_workers * 2)
         dataloaders['target'] = \
-                            DataLoader(self.target_dataset,
+                            DataLoader(self.train_target_dataset,
                                        batch_size=self.batch_size,
                                        pin_memory=True,
                                        shuffle=True,
                                        num_workers=self.num_workers)
         
         return dataloaders
-    
+
     def val_dataloader(self):
         dataloaders = []
         dataloaders.append(DataLoader(self.val_source_dataset,
@@ -545,7 +534,7 @@ class UDAModel(pl.LightningModule):
                                       shuffle=False,
                                       num_workers=self.num_workers))
         
-        dataloaders.append(DataLoader(self.target_dataset,
+        dataloaders.append(DataLoader(self.val_target_dataset,
                                       batch_size=self.batch_size,
                                       pin_memory=True,
                                       shuffle=False,

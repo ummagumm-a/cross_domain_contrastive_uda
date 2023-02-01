@@ -7,48 +7,35 @@ import torchvision.transforms as T
 from random import shuffle
 import torch
 
-class UDADataset(Dataset):
-    def __init__(self, items, labels):
-        assert labels is None or len(items) == len(labels)
-        
-        self.items = items
-        self.real_labels = labels.copy()
-        self.labels = labels
-        
-    def update_labels(self, new_labels):
-        assert self.labels is None or len(new_labels) == len(self.labels)
-        self.labels = new_labels
 
-    def __len__(self):
-        return len(self.items)
-    
-    def __getitem__(self, i):
-        if self.labels is None:
-            return self.items[i], -1
-        else:
-            return self.items[i], self.labels[i].astype(np.int64)
-        
-        
-        
 def second_last_dir(path):
-    return os.path.split(os.path.split(path)[0])[1]
+    return path.split(os.sep)[-2]#os.path.split(os.path.split(path)[0])[1]
 
-def office_label_mapping():
-    images_dir = os.path.join(os.getcwd(), 'datasets', 'OFFICE31', 'amazon', 'images')
-    images = Path(images_dir).rglob('*.jpg')
-    images = list(map(str, images))
-    labels = list(map(second_last_dir, images))
-    mapping = { label: i for i, label in enumerate(np.unique(labels)) }
+
+def office_label_mapping(datadir):
+    """
+    Makes a mapping from class name to a number.
+    
+    :param datadir: directory where the data is stored, e.g. 'datasets/OFFICE31/amazon/'
+    """
+    labels = sorted(os.listdir(datadir))
+    mapping = { label: i for i, label in enumerate(labels) }
     return mapping
 
-class OfficeDataset(Dataset):
-    def __init__(self, name, transform=None):
-        images_dir = os.path.join(os.getcwd(), 'datasets', 'OFFICE31', name, 'images')
-        images = Path(images_dir).rglob('*.jpg')
+
+class UDADataset(Dataset):
+    def __init__(self, images_dir, transform=None):
+        # load all images
+        images = list(Path(images_dir).rglob('*.jpg')) + list(Path(images_dir).rglob('*.png'))
+        # convert paths to strings
         images = list(map(str, images))
-        label_mapping = office_label_mapping()
+        # dict with class-number pairs
+        label_mapping = office_label_mapping(images_dir)
+        # extract class names
         self.class_names = list(label_mapping.keys())
+        # labels of samples
         labels = list(map(second_last_dir, images))
+        # convert them to numbers
         labels = list(map(lambda x: label_mapping[x], labels))
         
         self.pairs = list(zip(images, labels))
@@ -86,7 +73,11 @@ class OfficeDataset(Dataset):
     def __getitem__(self, i):
         pair = self.pairs[i]
         with Image.open(pair[0]) as img:
+            # For 1-channel images in visda
+            if img.mode == "L":
+                img = img.convert(mode='RGB')
             img = self.transform(img)
+
 
         return img, torch.tensor(pair[1], dtype=torch.long), \
                torch.tensor(self.real_labels[i], dtype=torch.long)

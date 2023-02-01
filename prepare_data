@@ -3,6 +3,35 @@
 data_dir="datasets/"
 wget https://wjdcloud.blob.core.windows.net/dataset/OFFICE31.zip -P $data_dir
 unzip $data_dir/OFFICE31.zip -d $data_dir
-python office_split.py $data_dir
+python data_split.py $data_dir/OFFICE31/amazon/
+python data_split.py $data_dir/OFFICE31/webcam/
+python data_split.py $data_dir/OFFICE31/dslr/
 rm $data_dir/OFFICE31.zip
+rm -rf $data_dir/OFFICE31/amazon/
+rm -rf $data_dir/OFFICE31/webcam/
+rm -rf $data_dir/OFFICE31/dslr/
+
+# visda train
+wget http://csr.bu.edu/ftp/visda17/clf/train.tar -P $data_dir/visda/
+tar xvf $data_dir/visda/train.tar -C $data_dir/visda/
+mv $data_dir/visda/train $data_dir/visda/source/
+python data_split.py $data_dir/visda/source/
+rm $data_dir/visda/train.tar
+rm -rf $data_dir/visda/source/
+
+# visda validation
+wget http://csr.bu.edu/ftp/visda17/clf/validation.tar -P $data_dir/visda
+tar xvf $data_dir/visda/validation.tar -C $data_dir/visda
+mv $data_dir/visda/validation $data_dir/visda/target
+python data_split.py $data_dir/visda/target/
+rm $data_dir/visda/validation.tar
+rm -rf $data_dir/visda/target/
+# broken file
+rm $data_dir/visda/target_train/bicycle/bicycle_126286.jpg
+
+## visda validation
+#wget http://csr.bu.edu/ftp/visda17/clf/test.tar -P $data_dir/visda
+#tar xvf $data_dir/visda/test.tar -C $data_dir/visda
+#mv $data_dir/visda/test $data_dir/visda/target_val
+#rm $data_dir/visda/test.tar
 
