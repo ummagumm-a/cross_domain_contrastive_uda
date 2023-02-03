@@ -46,12 +46,11 @@ def pretrain_on_source_setting():
         tau = 1.0,
         )
 
-def train(source_dataset, target_dataset, num_classes, settings, version, total_epochs=500, remove_mismatched=False):
+def train(source_dataset, target_dataset, num_classes, settings, version, device, total_epochs=500, remove_mismatched=False):
     # Define the backbone
     resnet = resnet50dsbn(pretrained=True, in_features=256)
     resnet.fc2 = FeatureNormL2()
-    resnet.out_features = 256
-    classification_head = nn.Linear(resnet.out_features, num_classes, bias=False)
+    classification_head = nn.Linear(resnet.in_features, num_classes, bias=False)
 
     if remove_mismatched:
         target_dataset = tuple(map(RemoveMismatchedAdapter, target_dataset))
@@ -63,7 +62,7 @@ def train(source_dataset, target_dataset, num_classes, settings, version, total_
                      remove_mismatched=remove_mismatched,
                      class_names=source_dataset[0].get_class_names())
 
-    tb_logger = TensorBoardLogger('lightning_logs', '23_final', version=version)
+    tb_logger = TensorBoardLogger('lightning_logs', '23_repaired', version=version)
 
     # add checkpointing to amazon-webcam dataset
     if 'aw' in version:
@@ -71,7 +70,7 @@ def train(source_dataset, target_dataset, num_classes, settings, version, total_
     else:
         model_ckpt = dict(save_last=False, save_top_k=0, every_n_epochs=None)
 
-    trainer = pl.Trainer(accelerator='gpu', devices=[4],
+    trainer = pl.Trainer(accelerator='gpu', devices=[device],
                          max_epochs=total_epochs,
                          logger=tb_logger,
                          # track_grad_norm=2, 
@@ -172,10 +171,10 @@ if __name__ == '__main__':
         ]
 
     training_modes = [
-#            ('baseline', baseline_setting), 
-#            ('negative_sampling', negative_sampling_setting), 
-#            ('pretrain', pretrain_on_source_setting),
-            ('no_adaptation', no_adaptation_setting)
+            ('baseline', baseline_setting, 7), 
+#            ('negative_sampling', negative_sampling_setting, 6), 
+#            ('pretrain', pretrain_on_source_setting, 5),
+#            ('no_adaptation', no_adaptation_setting, 4)
 
        ]
     
@@ -184,14 +183,14 @@ if __name__ == '__main__':
         # For each source-target pair
         for name, num_classes, source, target in dataset_pairs:
             # defines which mode of training to use
-            for setting_name, training_mode in training_modes:
+            for setting_name, training_mode, device in training_modes:
                 settings = training_mode()
                 version = f'{name}, {setting_name}, simulation_{i}'
 
-                train(source, target, num_classes, settings, version)
+                train(source, target, num_classes, settings, version, device)
                 if name == 'aw' and setting_name == 'baseline':
                     version = f'{name}, remove_mismatched, simulation_{i}'
-                    train(source, target, num_classes, settings, version, remove_mismatched=True)
+                    train(source, target, num_classes, settings, version, device, remove_mismatched=True)
 
 
 #    ckpt_path = 'lightning_logs/lightning_logs/baseline/checkpoints/last-v2.ckpt'

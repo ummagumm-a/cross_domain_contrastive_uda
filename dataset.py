@@ -6,6 +6,10 @@ from pathlib import Path
 import torchvision.transforms as T
 from random import shuffle
 import torch
+import logging
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 def second_last_dir(path):
@@ -29,10 +33,12 @@ class UDADataset(Dataset):
         images = list(Path(images_dir).rglob('*.jpg')) + list(Path(images_dir).rglob('*.png'))
         # convert paths to strings
         images = list(map(str, images))
+        shuffle(images)
+#        images = random.shuffle(images)
         # dict with class-number pairs
         label_mapping = office_label_mapping(images_dir)
         # extract class names
-        self.class_names = list(label_mapping.keys())
+        self.class_names = sorted(list(label_mapping.keys()))
         # labels of samples
         labels = list(map(second_last_dir, images))
         # convert them to numbers
@@ -44,6 +50,12 @@ class UDADataset(Dataset):
         self.real_labels = self.labels.copy()
         
         if transform is None:
+            logger.info("No transform passed. Use the default transform")
+            transform = T.Compose([
+                    T.Resize((300, 300)), 
+                    T.ToTensor(),
+                    T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+                    ])
             transform = T.Compose([T.ToTensor(), T.Resize((300, 300))])
             
         self.transform = transform

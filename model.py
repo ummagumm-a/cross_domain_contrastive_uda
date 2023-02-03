@@ -6,14 +6,12 @@ import pytorch_lightning as pl
 import torchmetrics
 import numpy as np
 from sklearn.cluster import KMeans
-#from sklearn.utils.validation import check_is_fitted
-#from sklearn.exceptions import NotFittedError
-#from spherecluster import SphericalKMeans
 import os
 import plotly.express as px
 
 import logging
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 class UDAModel(pl.LightningModule):
@@ -53,7 +51,6 @@ class UDAModel(pl.LightningModule):
         #self.recall_metric = torchmetrics.Recall(num_classes=n_classes, average=None)
         
         self.clusterizer = KMeans(n_clusters=self.n_classes, n_init=1)
-        # self.clusterizer = SphericalKMeans(n_clusters=self.n_classes)
         
     def check_class_names(self, class_names):
         if class_names is None:
@@ -80,8 +77,8 @@ class UDAModel(pl.LightningModule):
         else:
             return total_epochs
         
-    def __call__(self, input, domain_label):
-        features = self.feature_extractor(input, domain_label)
+    def __call__(self, inp, domain_label):
+        features = self.feature_extractor(inp, domain_label)
         
         return self.classification_head(features)
     
@@ -112,7 +109,7 @@ class UDAModel(pl.LightningModule):
     def calculate_class_centers(self):
         dataloader = self.dataloader_source_for_centroids()
 
-        accum = torch.zeros((self.n_classes, self.feature_extractor.out_features), device=self.device)
+        accum = torch.zeros((self.n_classes, self.feature_extractor.in_features), device=self.device)
         labels_count = torch.zeros(self.n_classes, dtype=torch.long, device=self.device)
 
         # TODO: may result in overflow. Rewrite with running mean.
@@ -147,8 +144,8 @@ class UDAModel(pl.LightningModule):
         
         self.clusterizer.fit(all_features)
     
-    def assign_labels(self, dataloader):
-#        dataloader = self.dataloader_target_for_clustering()
+    def assign_labels(self):
+        dataloader = self.dataloader_target_for_clustering()
 
         collected_labels = []
         for x, _, _ in dataloader:
@@ -197,32 +194,37 @@ class UDAModel(pl.LightningModule):
         #     self.logger.experiment.add_scalar(f'Class {i} mislabeled fraction', (ilabels != i).sum() / len(ilabels), self.current_epoch)
             
     def on_train_epoch_start(self):
+#        if self.pretrain_num_epochs <= self.current_epoch:
+        logger.info("Do pseudo-labeling")
         self.feature_extractor.eval()
         if self.remove_mismatched:
+            logger.info("Remove mismatched reset")
             self.train_target_dataset.reset()
 
         with torch.no_grad():
             self.calculate_class_centers()
             self.fit_clusterizer()
-            assigned_labels = self.assign_labels(self.dataloader_target_for_clustering())
+            assigned_labels = self.assign_labels()
             self.train_target_dataset.update_labels(assigned_labels)
 #            self.visualize_pseudo_labeling()
             self.class_analysis(self.train_target_dataset)
             self.log('unique labels', len(np.unique(self.train_target_dataset.get_labels())))
             
         self.feature_extractor.train()
-    
+
     def classification_step(self, batch):
-        source_x, source_y, _ = batch
+        source_x, source_y, source_y_real = batch
+        assert torch.all(source_y == source_y_real), "y != y_real in classification step"
         
         pred = self(source_x, 0)
-        classification_loss = self.classification_loss(pred, source_y)
+        logger.debug(f"Pred shape: {pred.shape}, {source_y.shape}")
+        class_loss = self.classification_loss(pred, source_y)
         
-        return classification_loss
+        return class_loss
     
     def get_same_class(self, batch, cls):
         x, y, _ = batch
-        
+        logger.debug(f"Same class: {y.shape}, {len(y == cls)}, {x.shape}, {len(x[y == cls])}, X_same: {x[y == cls]}, Y: {y}, X: {x}")
         return x[y == cls]
     
     def analyze_negative_samples(self, anchor, negatives, positives, anchor_type):
@@ -381,21 +383,21 @@ class UDAModel(pl.LightningModule):
             raise Exception(f"Wrong negative sampling option {negative_sampling}. Available options are: {negative_sampling_options}.")
     
     def contrastive_step(self, anchors_batch, other_batch, anchor_type):
-        other_x, other_y, other_y_real = other_batch
+        other_feat, other_y, other_y_real = other_batch
         
         contrastive_loss = 0
-        for x, y, y_real in zip(*anchors_batch):
+        for feat, y, y_real in zip(*anchors_batch):
             same_class_indices = other_y == y
             if not same_class_indices.any():
                 continue
 
-            positives = other_x[same_class_indices]
-            negatives = other_x[~same_class_indices]
+            positives = other_feat[same_class_indices]
+            negatives = other_feat[~same_class_indices]
 
-            positives_sims = positives @ x
+            positives_sims = positives @ feat
             positives_exp = torch.exp(positives_sims / self.tau)
-            negatives_sims = negatives @ x
-#             self.analyze_negative_samples((x, y, y_real), 
+            negatives_sims = negatives @ feat
+#             self.analyze_negative_samples((feat, y, y_real), 
 #                                           (negatives_sims, other_y[~same_class_indices], other_y_real[~same_class_indices]),
 #                                           (positives_sims, other_y[same_class_indices], other_y_real[same_class_indices]),
 #                                           anchor_type)
@@ -429,13 +431,15 @@ class UDAModel(pl.LightningModule):
     
     def training_step(self, batch):
         source_for_classification, (source_x, source_y, source_y_real) = self.split_batch_in_two(batch['source'])
+        assert torch.all(source_y == source_y_real), "y != y_real in training step"
         classification_loss = self.classification_step(source_for_classification)
         
         if self.pretrain_num_epochs <= self.current_epoch:
+            logger.info("Do contrastive step")
             target_x, target_y, target_y_real = batch['target']
 
-            target_features = self.feature_extractor(target_x, 1)
             source_features = self.feature_extractor(source_x, 0)
+            target_features = self.feature_extractor(target_x, 1)
             contrastive_target_anchor = self.contrastive_step(
                 (target_features, target_y, target_y_real), 
                 (source_features, source_y, source_y_real), 
@@ -449,7 +453,9 @@ class UDAModel(pl.LightningModule):
             contrastive_loss = contrastive_target_anchor + contrastive_source_anchor
 
         else:
+            logger.info("Don't do contrastive step")
             contrastive_loss = -1
+
         train_loss = classification_loss + self.lmbda * contrastive_loss
         
         self.log_dict({
@@ -480,20 +486,27 @@ class UDAModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx, dataloader_idx):
         x, y, y_real = batch
+        assert torch.all(y == y_real), f"y != y_real in validation step ({dataloader_idx})"
+
         if dataloader_idx == 0:
-            pred = self(x, 0)
-            loss = self.classification_loss(pred, y)
+            source_x, source_y, source_y_real = x, y, y_real
+            # Source metrics
+            source_pred = self(source_x, 0)
+            loss = self.classification_loss(source_pred, source_y)
 
             self.log("source_val_loss", loss, on_epoch=True, on_step=False, add_dataloader_idx=False)
-            self.log_dict(self.val_metrics(pred, y, 'source'), on_epoch=True, on_step=False, add_dataloader_idx=False)
-        elif dataloader_idx == 1:
-            pred = self(x, 1)
-            loss = self.classification_loss(pred, y_real)
+            self.log_dict(self.val_metrics(source_pred, source_y, 'source'), on_epoch=True, on_step=False, add_dataloader_idx=False)
+        if dataloader_idx == 1:
+            target_x, target_y, target_y_real = x, y, y_real
+            # Target metrics
+            target_pred = self(target_x, 1)
+            loss = self.classification_loss(target_pred, target_y)
 
             self.log("target_val_loss", loss, on_epoch=True, on_step=False, add_dataloader_idx=False)
-            self.log_dict(self.val_metrics(pred, y_real, 'target'), on_epoch=True, on_step=False, add_dataloader_idx=False)
-        else:
-            raise Exception(f'Weird dataloader_idx: {dataloader_idx}')
+            self.log_dict(self.val_metrics(target_pred, target_y, 'target'), on_epoch=True, on_step=False, add_dataloader_idx=False)
+
+        if dataloader_idx not in [0, 1]:
+            raise Exception(f'weird dataloader num: {dataloader_idx}')
         
     def dataloader_target_for_clustering(self):
         return DataLoader(self.train_target_dataset,
