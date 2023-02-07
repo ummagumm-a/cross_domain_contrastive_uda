@@ -13,6 +13,7 @@ import torch
 import logging
 from torchvision.models import ResNet50_Weights
 import os
+import copy
 
 def baseline_setting():
     return dict(
@@ -46,7 +47,7 @@ def pretrain_on_source_setting():
         tau = 1.0,
         )
 
-def train(source_dataset, target_dataset, num_classes, settings, version, device, total_epochs=500, remove_mismatched=False):
+def train(source_dataset, target_dataset, num_classes, settings, version, device, total_epochs=400, remove_mismatched=False):
     # Define the backbone
     resnet = resnet50dsbn(pretrained=True, in_features=256)
     resnet.fc2 = FeatureNormL2()
@@ -160,21 +161,24 @@ if __name__ == '__main__':
     transform = ResNet50_Weights.DEFAULT.transforms()
     amazon_dataset, webcam_dataset, dslr_dataset, visda_source, visda_target = make_datasets(transform)
 
+    cp = lambda x: tuple(map(lambda y: copy.deepcopy(y), x))
+
     dataset_pairs = [
-        ('aw', 31, amazon_dataset, webcam_dataset),
-        ('ad', 31, amazon_dataset, dslr_dataset),
-        ('wa', 31, webcam_dataset, amazon_dataset),
-        ('wd', 31, webcam_dataset, dslr_dataset),
-        ('da', 31, dslr_dataset, amazon_dataset),
-        ('dw', 31, dslr_dataset, webcam_dataset),
-        ('visda', 12, visda_source, visda_target),
+        ('aw', 31, cp(amazon_dataset), cp(webcam_dataset)),
+        ('ad', 31, cp(amazon_dataset), cp(dslr_dataset)),
+        ('wa', 31, cp(webcam_dataset), cp(amazon_dataset)),
+        ('wd', 31, cp(webcam_dataset), cp(dslr_dataset)),
+        ('da', 31, cp(dslr_dataset), cp(amazon_dataset)),
+        ('dw', 31, cp(dslr_dataset), cp(webcam_dataset)),
+#        ('visda', 12, cp(visda_source), cp(visda_target)),
         ]
 
     training_modes = [
-            ('baseline', baseline_setting, 7), 
+#            ('005_baseline', baseline_setting, 3), 
+#            ('baseline', baseline_setting, 7), 
 #            ('negative_sampling', negative_sampling_setting, 6), 
 #            ('pretrain', pretrain_on_source_setting, 5),
-#            ('no_adaptation', no_adaptation_setting, 4)
+            ('no_adaptation', no_adaptation_setting, 4)
 
        ]
     
