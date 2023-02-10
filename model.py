@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, random_split, SubsetRandomSampler
 from torch.optim.lr_scheduler import LambdaLR
 import pytorch_lightning as pl
 import torchmetrics
@@ -18,11 +18,13 @@ class UDAModel(pl.LightningModule):
     def __init__(self, feature_extractor, classification_head, n_classes, 
                        source_dataset, target_dataset, 
                        tau=1., b=0.75, test_size=0.3, lmbda=1.4, 
+                       pseudo_filter_threshold=0.75,
                        explicit_negative_sampling_threshold=0.5,
                        batch_size=64, num_workers=48, pretrain_num_epochs=0,
                        negative_sampling=None, remove_mismatched=False,
                        total_epochs=None, class_names=None):
         super().__init__()
+
         self.n_classes = n_classes
         # The last layer should be smth giving (N, out_features)
         self.feature_extractor = feature_extractor
@@ -31,6 +33,7 @@ class UDAModel(pl.LightningModule):
         
         self.tau = tau
         self.explicit_negative_sampling_threshold = explicit_negative_sampling_threshold
+        self.pseudo_filter_threshold = pseudo_filter_threshold
         self.b = b
         self.lmbda = lmbda
         self.test_size = test_size
@@ -45,8 +48,9 @@ class UDAModel(pl.LightningModule):
         
         self.train_source_dataset, self.val_source_dataset = source_dataset
         self.train_target_dataset, self.val_target_dataset = target_dataset
+        self.valid_target_samples = list(range(len(self.train_target_dataset)))
         
-        self.accuracy_metric = torchmetrics.Accuracy(num_classes=n_classes, average=None)
+        self.accuracy_metric = torchmetrics.Accuracy(task='multiclass', num_classes=n_classes, average=None)
         #self.precision_metric = torchmetrics.Precision(num_classes=n_classes, average=None)
         #self.recall_metric = torchmetrics.Recall(num_classes=n_classes, average=None)
         
@@ -63,7 +67,7 @@ class UDAModel(pl.LightningModule):
         Checks correctness of 'negative_sampling' parameter.
         """
         
-        negative_sampling_options = [None, 'soft', 'hard']
+        negative_sampling_options = [None, 'soft', 'hard', 'random']
         if negative_sampling in negative_sampling_options:
             return negative_sampling
         else:
@@ -128,11 +132,12 @@ class UDAModel(pl.LightningModule):
             accum += batch_class_means
             
 
-        initial_centers = accum / labels_count.float().unsqueeze(1)
+        initial_centers = (accum / labels_count.float().unsqueeze(1)).cpu().numpy()
+        initial_centers /= np.linalg.norm(initial_centers, axis=1)[:, np.newaxis]
 
-        self.clusterizer.set_params(init=initial_centers.cpu())
+        self.clusterizer.set_params(init=initial_centers)
 
-    def fit_clusterizer(self):
+    def get_target_features(self):
         dataloader = self.dataloader_target_for_clustering()
         all_features = []
         for x, _, _ in dataloader:
@@ -141,23 +146,9 @@ class UDAModel(pl.LightningModule):
             features = features.cpu().numpy()
             all_features.append(features)
         all_features = np.vstack(all_features)
-        
-        self.clusterizer.fit(all_features)
-    
-    def assign_labels(self):
-        dataloader = self.dataloader_target_for_clustering()
 
-        collected_labels = []
-        for x, _, _ in dataloader:
-            x = x.to(self.device)
-            features = self.feature_extractor(x, 1)
-            features = features.cpu().numpy()
+        return all_features
 
-            pred = self.clusterizer.predict(features)
-            collected_labels.append(pred)
-
-        return np.hstack(collected_labels)
-    
     def visualize_pseudo_labeling(self):
         real_labels, labels = [], []
         for i in range(len(self.train_target_dataset)):
@@ -193,6 +184,20 @@ class UDAModel(pl.LightningModule):
         #                                          bins=31)
         #     self.logger.experiment.add_scalar(f'Class {i} mislabeled fraction', (ilabels != i).sum() / len(ilabels), self.current_epoch)
             
+
+    def filter_after_cluster(self, features, centers):
+        centers /= np.linalg.norm(centers, axis=1)[:, np.newaxis]
+        sims = features @ centers.T
+        max_sims = sims.max(axis=1)
+        assert len(max_sims) == len(features)
+        mask = max_sims > self.pseudo_filter_threshold
+
+        self.valid_target_samples = np.arange(len(self.train_target_dataset))[mask]
+        np.random.shuffle(self.valid_target_samples)
+        self.valid_target_samples = self.valid_target_samples.tolist()
+
+        self.logger.experiment.add_scalar(f'Valid targets', len(self.valid_target_samples), self.current_epoch)
+
     def on_train_epoch_start(self):
 #        if self.pretrain_num_epochs <= self.current_epoch:
         logger.info("Do pseudo-labeling")
@@ -203,11 +208,13 @@ class UDAModel(pl.LightningModule):
 
         with torch.no_grad():
             self.calculate_class_centers()
-            self.fit_clusterizer()
-            assigned_labels = self.assign_labels()
+            all_features = self.get_target_features()
+            self.clusterizer.fit(all_features)
+            assigned_labels = self.clusterizer.labels_
             self.train_target_dataset.update_labels(assigned_labels)
 #            self.visualize_pseudo_labeling()
             self.class_analysis(self.train_target_dataset)
+            self.filter_after_cluster(all_features, self.clusterizer.cluster_centers_)
             self.log('unique labels', len(np.unique(self.train_target_dataset.get_labels())))
             
         self.feature_extractor.train()
@@ -217,14 +224,12 @@ class UDAModel(pl.LightningModule):
         assert torch.all(source_y == source_y_real), "y != y_real in classification step"
         
         pred = self(source_x, 0)
-        logger.debug(f"Pred shape: {pred.shape}, {source_y.shape}")
         class_loss = self.classification_loss(pred, source_y)
         
         return class_loss
     
     def get_same_class(self, batch, cls):
         x, y, _ = batch
-        logger.debug(f"Same class: {y.shape}, {len(y == cls)}, {x.shape}, {len(x[y == cls])}, X_same: {x[y == cls]}, Y: {y}, X: {x}")
         return x[y == cls]
     
     def analyze_negative_samples(self, anchor, negatives, positives, anchor_type):
@@ -376,9 +381,14 @@ class UDAModel(pl.LightningModule):
         if self.negative_sampling is None:
             return negatives_sims
         elif self.negative_sampling == 'soft':
-            return negatives_sims[negatives_sims < self.explicit_negative_sampling_threshold]
+            return negatives_sims[torch.detach(negatives_sims < self.explicit_negative_sampling_threshold)]
         elif self.negative_sampling == 'hard':
-            return negatives_sims[negatives_sims > self.explicit_negative_sampling_threshold]
+            return negatives_sims[torch.detach(negatives_sims > self.explicit_negative_sampling_threshold)]
+        elif self.negative_sampling == 'random':
+            num_negs = torch.sum(torch.detach(negatives_sims > self.explicit_negative_sampling_threshold))
+            indices = torch.randperm(len(negatives_sims))[:num_negs]
+            
+            return negatives_sims[indices]
         else:
             raise Exception(f"Wrong negative sampling option {negative_sampling}. Available options are: {negative_sampling_options}.")
     
@@ -428,7 +438,7 @@ class UDAModel(pl.LightningModule):
         assert abs(len(x1) - len(x2)) <= 1, f'{abs(len(x1) - len(x2))}'
         
         return (x1, y1, y_real1), (x2, y2, y_real2)
-    
+  
     def training_step(self, batch):
         source_for_classification, (source_x, source_y, source_y_real) = self.split_batch_in_two(batch['source'])
         assert torch.all(source_y == source_y_real), "y != y_real in training step"
@@ -534,7 +544,7 @@ class UDAModel(pl.LightningModule):
                             DataLoader(self.train_target_dataset,
                                        batch_size=self.batch_size,
                                        pin_memory=True,
-                                       shuffle=True,
+                                       sampler=SubsetRandomSampler(self.valid_target_samples),
                                        num_workers=self.num_workers)
         
         return dataloaders

@@ -23,6 +23,14 @@ def baseline_setting():
         tau = 1.0,
         )
 
+def baseline005_setting():
+    return dict(
+        pretrain_num_epochs = 0,
+        explicit_negative_sampling_threshold = 0.0,
+        negative_sampling = None,
+        tau = 0.05,
+        )
+
 def no_adaptation_setting():
     return dict(
         pretrain_num_epochs = 10000,
@@ -39,6 +47,14 @@ def negative_sampling_setting():
         tau = 1.0,
         )
 
+def random_negative_sampling_setting():
+    return dict(
+        pretrain_num_epochs = 0,
+        explicit_negative_sampling_threshold = 0.5,
+        negative_sampling = 'random',
+        tau = 1.0,
+        )
+
 def pretrain_on_source_setting():
     return dict(
         pretrain_num_epochs = 100,
@@ -47,7 +63,9 @@ def pretrain_on_source_setting():
         tau = 1.0,
         )
 
-def train(source_dataset, target_dataset, num_classes, settings, version, device, total_epochs=400, remove_mismatched=False):
+
+
+def train(source_dataset, target_dataset, num_classes, settings, version, device, total_epochs=500, remove_mismatched=False):
     # Define the backbone
     resnet = resnet50dsbn(pretrained=True, in_features=256)
     resnet.fc2 = FeatureNormL2()
@@ -58,18 +76,18 @@ def train(source_dataset, target_dataset, num_classes, settings, version, device
 
     model = UDAModel(resnet, classification_head, num_classes, 
                      source_dataset, target_dataset, 
-                     total_epochs=total_epochs, batch_size=64,
-                     num_workers=1, **settings,
+                     total_epochs=total_epochs, batch_size=84,
+                     num_workers=6, **settings,
                      remove_mismatched=remove_mismatched,
                      class_names=source_dataset[0].get_class_names())
 
-    tb_logger = TensorBoardLogger('lightning_logs', '23_repaired', version=version)
+    tb_logger = TensorBoardLogger('lightning_logs', 'shit', version=version)
 
     # add checkpointing to amazon-webcam dataset
-    if 'aw' in version:
-        model_ckpt = dict(save_last=True, save_top_k=1, every_n_epochs=333)
+    if 'baseline' in version:
+        model_ckpt = dict(save_last=True, save_top_k=1)
     else:
-        model_ckpt = dict(save_last=False, save_top_k=0, every_n_epochs=None)
+        model_ckpt = dict(save_last=False, save_top_k=0)
 
     trainer = pl.Trainer(accelerator='gpu', devices=[device],
                          max_epochs=total_epochs,
@@ -174,11 +192,11 @@ if __name__ == '__main__':
         ]
 
     training_modes = [
-#            ('005_baseline', baseline_setting, 3), 
-#            ('baseline', baseline_setting, 7), 
+            ('baseline', baseline_setting, 2), 
 #            ('negative_sampling', negative_sampling_setting, 6), 
 #            ('pretrain', pretrain_on_source_setting, 5),
-            ('no_adaptation', no_adaptation_setting, 4)
+#            ('no_adaptation', no_adaptation_setting, 4),
+#            ('random_sampling', random_negative_sampling_setting, 3),
 
        ]
     
@@ -192,9 +210,9 @@ if __name__ == '__main__':
                 version = f'{name}, {setting_name}, simulation_{i}'
 
                 train(source, target, num_classes, settings, version, device)
-                if name == 'aw' and setting_name == 'baseline':
-                    version = f'{name}, remove_mismatched, simulation_{i}'
-                    train(source, target, num_classes, settings, version, device, remove_mismatched=True)
+#                if name == 'aw' and setting_name == 'baseline':
+#                    version = f'{name}, remove_mismatched, simulation_{i}'
+#                    train(source, target, num_classes, settings, version, device, remove_mismatched=True)
 
 
 #    ckpt_path = 'lightning_logs/lightning_logs/baseline/checkpoints/last-v2.ckpt'
