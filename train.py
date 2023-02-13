@@ -65,7 +65,7 @@ def pretrain_on_source_setting():
 
 
 
-def train(source_dataset, target_dataset, num_classes, settings, version, device, total_epochs=500, remove_mismatched=False):
+def train(source_dataset, target_dataset, num_classes, settings, version, device, track_grad_norm=False, total_epochs=500, remove_mismatched=False):
     # Define the backbone
     resnet = resnet50dsbn(pretrained=True, in_features=256)
     resnet.fc2 = FeatureNormL2()
@@ -75,13 +75,13 @@ def train(source_dataset, target_dataset, num_classes, settings, version, device
         target_dataset = tuple(map(RemoveMismatchedAdapter, target_dataset))
 
     model = UDAModel(resnet, classification_head, num_classes, 
-                     source_dataset, target_dataset, 
+                     source_dataset, target_dataset, track_grad_norm=track_grad_norm,
                      total_epochs=total_epochs, batch_size=84,
                      num_workers=6, **settings,
-                     remove_mismatched=remove_mismatched,
+                     remove_mismatched=remove_mismatched, grad_clip=1.5,
                      class_names=source_dataset[0].get_class_names())
 
-    tb_logger = TensorBoardLogger('lightning_logs', 'shit', version=version)
+    tb_logger = TensorBoardLogger('lightning_logs', 'norm_tracker', version=version)
 
     # add checkpointing to amazon-webcam dataset
     if 'baseline' in version:
@@ -92,9 +92,8 @@ def train(source_dataset, target_dataset, num_classes, settings, version, device
     trainer = pl.Trainer(accelerator='gpu', devices=[device],
                          max_epochs=total_epochs,
                          logger=tb_logger,
-                         # track_grad_norm=2, 
-                         gradient_clip_val=1.5,
-                         log_every_n_steps=16,
+                         log_every_n_steps=13,
+                         gradient_clip_val=None if track_grad_norm else 1.5,
                          multiple_trainloader_mode='max_size_cycle',
                          callbacks=[
                              ModelCheckpoint(monitor='source_val_loss', 
@@ -168,6 +167,7 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
 #    pl.seed_everything(41)
     num_simulations = 1
+    track_grad_norm = True
 
 #    transform = T.Compose([
 #        T.Resize((300, 300)), 
@@ -183,21 +183,20 @@ if __name__ == '__main__':
 
     dataset_pairs = [
         ('aw', 31, cp(amazon_dataset), cp(webcam_dataset)),
-        ('ad', 31, cp(amazon_dataset), cp(dslr_dataset)),
-        ('wa', 31, cp(webcam_dataset), cp(amazon_dataset)),
-        ('wd', 31, cp(webcam_dataset), cp(dslr_dataset)),
-        ('da', 31, cp(dslr_dataset), cp(amazon_dataset)),
-        ('dw', 31, cp(dslr_dataset), cp(webcam_dataset)),
+#        ('ad', 31, cp(amazon_dataset), cp(dslr_dataset)),
+#        ('wa', 31, cp(webcam_dataset), cp(amazon_dataset)),
+#        ('wd', 31, cp(webcam_dataset), cp(dslr_dataset)),
+#        ('da', 31, cp(dslr_dataset), cp(amazon_dataset)),
+#        ('dw', 31, cp(dslr_dataset), cp(webcam_dataset)),
 #        ('visda', 12, cp(visda_source), cp(visda_target)),
         ]
 
     training_modes = [
-            ('baseline', baseline_setting, 2), 
-#            ('negative_sampling', negative_sampling_setting, 6), 
-#            ('pretrain', pretrain_on_source_setting, 5),
-#            ('no_adaptation', no_adaptation_setting, 4),
-#            ('random_sampling', random_negative_sampling_setting, 3),
-
+            ('baseline', baseline_setting, 1), 
+            ('negative_sampling', negative_sampling_setting, 1), 
+            ('pretrain', pretrain_on_source_setting, 1),
+            ('no_adaptation', no_adaptation_setting, 1),
+            ('random_sampling', random_negative_sampling_setting, 1),
        ]
     
     # Run training for several simulations to obtain more reliable results
@@ -209,7 +208,7 @@ if __name__ == '__main__':
                 settings = training_mode()
                 version = f'{name}, {setting_name}, simulation_{i}'
 
-                train(source, target, num_classes, settings, version, device)
+                train(source, target, num_classes, settings, version, device, track_grad_norm=track_grad_norm)
 #                if name == 'aw' and setting_name == 'baseline':
 #                    version = f'{name}, remove_mismatched, simulation_{i}'
 #                    train(source, target, num_classes, settings, version, device, remove_mismatched=True)

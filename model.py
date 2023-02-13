@@ -18,12 +18,16 @@ class UDAModel(pl.LightningModule):
     def __init__(self, feature_extractor, classification_head, n_classes, 
                        source_dataset, target_dataset, 
                        tau=1., b=0.75, test_size=0.3, lmbda=1.4, 
-                       pseudo_filter_threshold=0.75,
-                       explicit_negative_sampling_threshold=0.5,
+                       pseudo_filter_threshold=0.9, track_grad_norm=False,
+                       explicit_negative_sampling_threshold=0.5, grad_clip=1.5,
                        batch_size=64, num_workers=48, pretrain_num_epochs=0,
                        negative_sampling=None, remove_mismatched=False,
                        total_epochs=None, class_names=None):
         super().__init__()
+
+        self.track_grad_norm = track_grad_norm
+        self.automatic_optimization = not self.track_grad_norm
+        self.grad_clip = grad_clip
 
         self.n_classes = n_classes
         # The last layer should be smth giving (N, out_features)
@@ -380,12 +384,17 @@ class UDAModel(pl.LightningModule):
         
         if self.negative_sampling is None:
             return negatives_sims
+
         elif self.negative_sampling == 'soft':
-            return negatives_sims[torch.detach(negatives_sims < self.explicit_negative_sampling_threshold)]
+            indices = negatives_sims < self.explicit_negative_sampling_threshold
+            return negatives_sims[indices]
+
         elif self.negative_sampling == 'hard':
-            return negatives_sims[torch.detach(negatives_sims > self.explicit_negative_sampling_threshold)]
+            indices = negatives_sims > self.explicit_negative_sampling_threshold
+            return negatives_sims[indices]
+
         elif self.negative_sampling == 'random':
-            num_negs = torch.sum(torch.detach(negatives_sims > self.explicit_negative_sampling_threshold))
+            num_negs = torch.sum(negatives_sims > self.explicit_negative_sampling_threshold)
             indices = torch.randperm(len(negatives_sims))[:num_negs]
             
             return negatives_sims[indices]
@@ -438,8 +447,8 @@ class UDAModel(pl.LightningModule):
         assert abs(len(x1) - len(x2)) <= 1, f'{abs(len(x1) - len(x2))}'
         
         return (x1, y1, y_real1), (x2, y2, y_real2)
-  
-    def training_step(self, batch):
+
+    def compute_losses(self, batch):
         source_for_classification, (source_x, source_y, source_y_real) = self.split_batch_in_two(batch['source'])
         assert torch.all(source_y == source_y_real), "y != y_real in training step"
         classification_loss = self.classification_step(source_for_classification)
@@ -466,8 +475,92 @@ class UDAModel(pl.LightningModule):
             logger.info("Don't do contrastive step")
             contrastive_loss = -1
 
-        train_loss = classification_loss + self.lmbda * contrastive_loss
-        
+        return classification_loss, contrastive_loss
+
+    def extract_gradients(self):
+        grads = []
+        for i, (name, param) in enumerate(self.feature_extractor.named_parameters()):
+            grads.append(param.grad)
+
+        for i, (name, param) in enumerate(self.classification_head.named_parameters()):
+            grads.append(param.grad)
+
+        return grads
+
+    def sum_gradients(self, grads1, grads2):
+        grads = []
+        for grad1, grad2 in zip(grads1, grads2):
+            if grad1 is None and grad2 is None:
+                grads.append(None)
+            # why there can be a None value in one grad but not in the other?
+            # These are the gradients of DSBN. Classification doesn't use target-specific BN, so no gradients will be there.
+            elif grad1 is None or grad2 is None:
+                if grad1 is not None:
+                    grads.append(grad1)   
+                elif grad2 is not None:
+                    grads.append(grad2)   
+
+            else:
+                grads.append(grad1 + grad2)
+
+        return grads
+
+    def set_gradients(self, grads):
+        for i, (param, grad) in enumerate(zip(self.feature_extractor.parameters(), grads)):
+            param.grad = grad
+
+        for param, grad in zip(self.classification_head.parameters(), grads[i + 1:]):
+            param.grad = grad
+
+    def log_grad_norm(self, grads, name):
+        nonnan_grads = list(map(lambda x: x.flatten(), filter(lambda x: x is not None, grads)))
+
+        grad_norm = torch.hstack(nonnan_grads).norm(2).detach()
+        self.logger.experiment.add_scalar(f'{name} loss grad norm', grad_norm, self.global_step)
+
+    def training_step(self, batch):
+        classification_loss, contrastive_loss = self.compute_losses(batch)
+        contrastive_loss *= self.lmbda
+        train_loss = classification_loss + contrastive_loss
+
+        if self.track_grad_norm:
+            opt = self.optimizers()
+            sch = self.lr_schedulers()
+
+            # Calculate gradient norms for each loss separately
+            opt.zero_grad()
+            if float != type(contrastive_loss):
+                self.manual_backward(contrastive_loss, retain_graph=True)
+                with torch.no_grad():
+                    grads2 = self.extract_gradients()
+                    self.log_grad_norm(grads2, "Contrastive")
+            else:
+                self.logger.experiment.add_scalar(f'Contrastive loss grad norm', 0, self.global_step)
+
+            opt.zero_grad()
+            self.manual_backward(classification_loss, retain_graph=True)
+            with torch.no_grad():
+                grads1 = self.extract_gradients()
+                self.log_grad_norm(grads1, "Classification")
+
+    #        sum_grads = self.sum_gradients(grads1, grads2)
+    #        self.log_grad_norm(grads2, "Total Test")
+
+            # Calculate gradient on a combined loss
+            opt.zero_grad()
+            self.manual_backward(train_loss)
+            with torch.no_grad():
+                grads = self.extract_gradients()
+                self.log_grad_norm(grads, "Total")
+
+            # Make a step
+            self.clip_gradients(opt, gradient_clip_val=self.grad_clip, gradient_clip_algorithm="norm")
+            opt.step()
+
+            # Learning rate scheduler step
+            if self.trainer.is_last_batch:
+                sch.step()
+
         self.log_dict({
             "classification_loss": classification_loss,
             "contrastive_loss": contrastive_loss,
