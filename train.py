@@ -1,9 +1,9 @@
 import torchvision.transforms as T
 import pytorch_lightning as pl
 from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
-from resnetdsbn import resnet50dsbn
+from resnetdsbn import resnet50dsbn, resnet101dsbn
 from utils import FeatureNormL2
-from dataset import UDADataset, RemoveMismatchedAdapter
+from dataset import UDADataset
 from model import UDAModel
 import torch.nn as nn
 from pytorch_lightning import Trainer
@@ -65,23 +65,18 @@ def pretrain_on_source_setting():
 
 
 
-def train(source_dataset, target_dataset, num_classes, settings, version, device, track_grad_norm=False, total_epochs=500, remove_mismatched=False):
+def train(resnet, source_dataset, target_dataset, num_classes, settings, version, device, track_grad_norm=False, total_epochs=500, remove_mismatched=False):
     # Define the backbone
-    resnet = resnet50dsbn(pretrained=True, in_features=256)
-    resnet.fc2 = FeatureNormL2()
     classification_head = nn.Linear(resnet.in_features, num_classes, bias=False)
-
-    if remove_mismatched:
-        target_dataset = tuple(map(RemoveMismatchedAdapter, target_dataset))
 
     model = UDAModel(resnet, classification_head, num_classes, 
                      source_dataset, target_dataset, track_grad_norm=track_grad_norm,
-                     total_epochs=total_epochs, batch_size=84,
+                     total_epochs=total_epochs, 
                      num_workers=6, **settings,
                      remove_mismatched=remove_mismatched, grad_clip=1.5,
                      class_names=source_dataset[0].get_class_names())
 
-    tb_logger = TensorBoardLogger('lightning_logs', 'norm_tracker', version=version)
+    tb_logger = TensorBoardLogger('lightning_logs', 'new_one', version=version)
 
     # add checkpointing to amazon-webcam dataset
     if 'baseline' in version:
@@ -167,14 +162,8 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
 #    pl.seed_everything(41)
     num_simulations = 1
-    track_grad_norm = True
+    track_grad_norm = False
 
-#    transform = T.Compose([
-#        T.Resize((300, 300)), 
-#        T.ToTensor(),
-##         T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
-#        ])
-    
     # transforms that are suitable for the pretrained model
     transform = ResNet50_Weights.DEFAULT.transforms()
     amazon_dataset, webcam_dataset, dslr_dataset, visda_source, visda_target = make_datasets(transform)
@@ -182,22 +171,23 @@ if __name__ == '__main__':
     cp = lambda x: tuple(map(lambda y: copy.deepcopy(y), x))
 
     dataset_pairs = [
-        ('aw', 31, cp(amazon_dataset), cp(webcam_dataset)),
+#        ('aw', 31, cp(amazon_dataset), cp(webcam_dataset)),
 #        ('ad', 31, cp(amazon_dataset), cp(dslr_dataset)),
 #        ('wa', 31, cp(webcam_dataset), cp(amazon_dataset)),
 #        ('wd', 31, cp(webcam_dataset), cp(dslr_dataset)),
 #        ('da', 31, cp(dslr_dataset), cp(amazon_dataset)),
 #        ('dw', 31, cp(dslr_dataset), cp(webcam_dataset)),
-#        ('visda', 12, cp(visda_source), cp(visda_target)),
+        ('visda', 12, cp(visda_source), cp(visda_target)),
         ]
 
     training_modes = [
-            ('baseline', baseline_setting, 1), 
-            ('negative_sampling', negative_sampling_setting, 1), 
-            ('pretrain', pretrain_on_source_setting, 1),
-            ('no_adaptation', no_adaptation_setting, 1),
-            ('random_sampling', random_negative_sampling_setting, 1),
+#            ('baseline', baseline_setting, 7), 
+#            ('negative_sampling', negative_sampling_setting, 6), 
+#            ('pretrain', pretrain_on_source_setting, 5),
+#            ('no_adaptation', no_adaptation_setting, 4),
+#            ('random_sampling', random_negative_sampling_setting, 3),
        ]
+
     
     # Run training for several simulations to obtain more reliable results
     for i in range(num_simulations):
@@ -206,9 +196,19 @@ if __name__ == '__main__':
             # defines which mode of training to use
             for setting_name, training_mode, device in training_modes:
                 settings = training_mode()
+                if name == 'visda':
+                    settings['b'] = 2.25
+                    settings['tau'] = 0.05
+                    settings['batch_size'] = 64
+                    resnet = resnet101dsbn(pretrained=True, in_features=256)
+                else:
+                    resnet = resnet50dsbn(pretrained=True, in_features=256)
+                    settings['batch_size'] = 84
+
+                resnet.fc2 = FeatureNormL2()
                 version = f'{name}, {setting_name}, simulation_{i}'
 
-                train(source, target, num_classes, settings, version, device, track_grad_norm=track_grad_norm)
+                train(resnet, source, target, num_classes, settings, version, device, track_grad_norm=track_grad_norm, remove_mismatched=True)
 #                if name == 'aw' and setting_name == 'baseline':
 #                    version = f'{name}, remove_mismatched, simulation_{i}'
 #                    train(source, target, num_classes, settings, version, device, remove_mismatched=True)

@@ -58,7 +58,6 @@ class UDAModel(pl.LightningModule):
         #self.precision_metric = torchmetrics.Precision(num_classes=n_classes, average=None)
         #self.recall_metric = torchmetrics.Recall(num_classes=n_classes, average=None)
         
-        self.clusterizer = KMeans(n_clusters=self.n_classes, n_init=1)
         
     def check_class_names(self, class_names):
         if class_names is None:
@@ -121,7 +120,8 @@ class UDAModel(pl.LightningModule):
         labels_count = torch.zeros(self.n_classes, dtype=torch.long, device=self.device)
 
         # TODO: may result in overflow. Rewrite with running mean.
-        for x, y, _ in dataloader:
+        for x, y, y_real in dataloader:
+            assert torch.all(y == y_real), 'y != y_real in calculate_class_centers'
             x = x.to(self.device)
             y = y.to(self.device)
             features = self.feature_extractor(x, 0)
@@ -139,7 +139,7 @@ class UDAModel(pl.LightningModule):
         initial_centers = (accum / labels_count.float().unsqueeze(1)).cpu().numpy()
         initial_centers /= np.linalg.norm(initial_centers, axis=1)[:, np.newaxis]
 
-        self.clusterizer.set_params(init=initial_centers)
+        return initial_centers
 
     def get_target_features(self):
         dataloader = self.dataloader_target_for_clustering()
@@ -154,23 +154,18 @@ class UDAModel(pl.LightningModule):
         return all_features
 
     def visualize_pseudo_labeling(self):
-        real_labels, labels = [], []
-        for i in range(len(self.train_target_dataset)):
-            real_labels.append(self.train_target_dataset.get_real_labels()[i])
-            labels.append(self.train_target_dataset.get_labels()[i])
+        real_labels = self.train_target_dataset.real_labels
+        labels = self.train_target_dataset.labels
 
-        real_labels, labels = np.array(real_labels), np.array(labels)
         pairs = np.vstack((real_labels, labels))
         unique_pairs, counts = np.unique(pairs, axis=1, return_counts=True)
         fig = px.scatter_3d(x=unique_pairs[0, :], y=unique_pairs[1, :], z=counts)
         fig.show()
         
     def class_analysis(self, dataset):
-        labels = dataset.get_labels()
-        labels = np.array(labels)
-        real_labels = dataset.get_real_labels()
-        real_labels = np.array(real_labels)
-        self.logger.experiment.add_scalar(f'Mislabeled fraction', np.sum(labels != real_labels) / len(labels), self.current_epoch)
+        labels = dataset.labels
+        real_labels = dataset.real_labels
+        self.logger.experiment.add_scalar(f'Mislabeled fraction', np.mean(labels != real_labels), self.current_epoch)
 
         # find unassigned labels
         # unassigned_labels = set(range(31)).difference(np.unique(labels).tolist())
@@ -190,36 +185,53 @@ class UDAModel(pl.LightningModule):
             
 
     def filter_after_cluster(self, features, centers):
+        # Normalize the centers so they are on the unit-sphere
         centers /= np.linalg.norm(centers, axis=1)[:, np.newaxis]
+        # Calculate similarities between target features and cluster centers
         sims = features @ centers.T
+        # Similarity with the closest cluster center
         max_sims = sims.max(axis=1)
         assert len(max_sims) == len(features)
+        # Take only samples which are 'close enough' to class centroids
         mask = max_sims > self.pseudo_filter_threshold
+        self.logger.experiment.add_scalar(f'Close enough targets', np.sum(mask), self.current_epoch)
 
+        # If the setting is to not allow mislabeled samples in training dataset
+        if self.remove_mismatched:
+            mismatch_mask = self.train_target_dataset.real_labels == self.train_target_dataset.labels
+            
+            mask &= mismatch_mask
+
+        # Save indices of valid samples - they are 'close enough' (and optionally, are not mislabeled)
+        # This list will be used in 'train_dataloader' function
         self.valid_target_samples = np.arange(len(self.train_target_dataset))[mask]
         np.random.shuffle(self.valid_target_samples)
-        self.valid_target_samples = self.valid_target_samples.tolist()
 
-        self.logger.experiment.add_scalar(f'Valid targets', len(self.valid_target_samples), self.current_epoch)
+        self.logger.experiment.add_scalar(f'Remaining targets', np.sum(mask), self.current_epoch)
 
     def on_train_epoch_start(self):
 #        if self.pretrain_num_epochs <= self.current_epoch:
         logger.info("Do pseudo-labeling")
         self.feature_extractor.eval()
-        if self.remove_mismatched:
-            logger.info("Remove mismatched reset")
-            self.train_target_dataset.reset()
 
+        # Define a clusterizer
+        clusterizer = KMeans(n_clusters=self.n_classes, n_init=1)
         with torch.no_grad():
-            self.calculate_class_centers()
+            # Calculate class centroids on the source domain
+            initial_centers = self.calculate_class_centers()
+            # Initialize cluster positions
+            clusterizer.set_params(init=initial_centers)
+            # Collect features for target samples
             all_features = self.get_target_features()
-            self.clusterizer.fit(all_features)
-            assigned_labels = self.clusterizer.labels_
-            self.train_target_dataset.update_labels(assigned_labels)
-#            self.visualize_pseudo_labeling()
+            # Do clusterization
+            clusterizer.fit(all_features)
+            # Update target labels
+            self.train_target_dataset.labels = clusterizer.labels_
+            # Log stats about the results of pseudo-labeling
             self.class_analysis(self.train_target_dataset)
-            self.filter_after_cluster(all_features, self.clusterizer.cluster_centers_)
-            self.log('unique labels', len(np.unique(self.train_target_dataset.get_labels())))
+            # Filter out unwanted samples from training data. 
+            self.filter_after_cluster(all_features, clusterizer.cluster_centers_)
+            self.log('unique labels', len(np.unique(self.train_target_dataset.labels)))
             
         self.feature_extractor.train()
 
@@ -622,7 +634,7 @@ class UDAModel(pl.LightningModule):
         return DataLoader(self.train_source_dataset,
                           batch_size=self.batch_size,
                           pin_memory=True,
-                          shuffle=True,
+                          shuffle=False,
                           num_workers=self.num_workers)
     
     def train_dataloader(self):
