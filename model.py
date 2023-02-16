@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split, SubsetRandomSampler
 from torch.optim.lr_scheduler import LambdaLR
 import pytorch_lightning as pl
@@ -16,7 +17,7 @@ logger.setLevel(logging.DEBUG)
 
 class UDAModel(pl.LightningModule):
     def __init__(self, feature_extractor, classification_head, n_classes, 
-                       source_dataset, target_dataset, 
+                       source_dataset, target_dataset, contrastive_only=False,
                        tau=1., b=0.75, test_size=0.3, lmbda=1.4, 
                        pseudo_filter_threshold=0.9, track_grad_norm=False,
                        explicit_negative_sampling_threshold=0.5, grad_clip=1.5,
@@ -28,6 +29,9 @@ class UDAModel(pl.LightningModule):
         self.track_grad_norm = track_grad_norm
         self.automatic_optimization = not self.track_grad_norm
         self.grad_clip = grad_clip
+        
+        self.contrastive_only = contrastive_only
+        assert not (contrastive_only and pretrain_num_epochs > 0)
 
         self.n_classes = n_classes
         # The last layer should be smth giving (N, out_features)
@@ -236,11 +240,25 @@ class UDAModel(pl.LightningModule):
         self.feature_extractor.train()
 
     def classification_step(self, batch):
-        source_x, source_y, source_y_real = batch
-        assert torch.all(source_y == source_y_real), "y != y_real in classification step"
+        x, y, y_real = batch
+        assert torch.all(y == y_real), "y != y_real in classification step"
         
-        pred = self(source_x, 0)
-        class_loss = self.classification_loss(pred, source_y)
+        features = self.feature_extractor(x, 0)
+        if self.contrastive_only:
+            # In contrastive only mode I want only contrastive loss to have impact on feature encoder weights.
+            # Therefore, I detach 'features' from the computation graph, so classification loss impacts only classification head.
+            logger.info("contrastive_only - Detach features")
+            features = features.detach()
+
+        pred = self.classification_head(features)
+
+        with torch.no_grad():
+            probs = F.softmax(pred, dim=1)
+            probs = probs.max(dim=1).values.mean()
+
+            self.log('mean_pred_prob', probs, on_epoch=True, on_step=False)
+
+        class_loss = self.classification_loss(pred, y)
         
         return class_loss
     
@@ -463,7 +481,11 @@ class UDAModel(pl.LightningModule):
     def compute_losses(self, batch):
         source_for_classification, (source_x, source_y, source_y_real) = self.split_batch_in_two(batch['source'])
         assert torch.all(source_y == source_y_real), "y != y_real in training step"
-        classification_loss = self.classification_step(source_for_classification)
+
+        if self.contrastive_only:
+            classification_loss = 0
+        else:
+            classification_loss = self.classification_step(source_for_classification)
         
         if self.pretrain_num_epochs <= self.current_epoch:
             logger.info("Do contrastive step")
@@ -485,7 +507,7 @@ class UDAModel(pl.LightningModule):
 
         else:
             logger.info("Don't do contrastive step")
-            contrastive_loss = -1
+            contrastive_loss = 0
 
         return classification_loss, contrastive_loss
 
@@ -600,27 +622,29 @@ class UDAModel(pl.LightningModule):
         return log_dict
 
     def validation_step(self, batch, batch_idx, dataloader_idx):
-        x, y, y_real = batch
-        assert torch.all(y == y_real), f"y != y_real in validation step ({dataloader_idx})"
+        def val_helper(batch, domain_name, dsbn_index):
+            x, y, y_real = batch
+            assert torch.all(y == y_real), f"y != y_real in validation step ({dataloader_idx})"
 
+            pred = self(x, dsbn_index)
+            loss = self.classification_loss(pred, y)
+
+            self.log(f"{domain_name}_val_loss", loss, on_epoch=True, on_step=False, add_dataloader_idx=False)
+            self.log_dict(self.val_metrics(pred, y, domain_name), on_epoch=True, on_step=False, add_dataloader_idx=False)
+            
         if dataloader_idx == 0:
-            source_x, source_y, source_y_real = x, y, y_real
-            # Source metrics
-            source_pred = self(source_x, 0)
-            loss = self.classification_loss(source_pred, source_y)
+            val_helper(batch, 'source', 0)
 
-            self.log("source_val_loss", loss, on_epoch=True, on_step=False, add_dataloader_idx=False)
-            self.log_dict(self.val_metrics(source_pred, source_y, 'source'), on_epoch=True, on_step=False, add_dataloader_idx=False)
-        if dataloader_idx == 1:
-            target_x, target_y, target_y_real = x, y, y_real
-            # Target metrics
-            target_pred = self(target_x, 1)
-            loss = self.classification_loss(target_pred, target_y)
+        elif dataloader_idx == 1:
+            # When the model pretrains or we study no_adaptation setting, 
+            # weights of target-specific batch norms are not trained because no samples are passed through them
+            # Also, it must be evident that 'no_adaptation' means no adaptation techniques at all, so we should remove DSBN factor from model evaluation.
+            dsbn_index = int(self.pretrain_num_epochs <= self.current_epoch)
+            logger.info(f"Use dsbn_index {dsbn_index} on epoch {self.current_epoch} because model is pretrained for {self.pretrain_num_epochs} epochs")
 
-            self.log("target_val_loss", loss, on_epoch=True, on_step=False, add_dataloader_idx=False)
-            self.log_dict(self.val_metrics(target_pred, target_y, 'target'), on_epoch=True, on_step=False, add_dataloader_idx=False)
+            val_helper(batch, 'target', dsbn_index)
 
-        if dataloader_idx not in [0, 1]:
+        elif dataloader_idx not in [0, 1]:
             raise Exception(f'weird dataloader num: {dataloader_idx}')
         
     def dataloader_target_for_clustering(self):
