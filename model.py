@@ -1,4 +1,5 @@
 import torch
+import time
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split, SubsetRandomSampler
@@ -18,13 +19,14 @@ logger.setLevel(logging.DEBUG)
 class UDAModel(pl.LightningModule):
     def __init__(self, feature_extractor, classification_head, n_classes, 
                        source_dataset, target_dataset, contrastive_only=False,
-                       tau=1., b=0.75, test_size=0.3, lmbda=1.4, 
+                       tau=1., b=0.75, lmbda=1.4, 
                        pseudo_filter_threshold=0.9, track_grad_norm=False,
                        explicit_negative_sampling_threshold=0.5, grad_clip=1.5,
                        batch_size=64, num_workers=48, pretrain_num_epochs=0,
                        negative_sampling=None, remove_mismatched=False,
                        total_epochs=None, class_names=None):
         super().__init__()
+        self.save_hyperparameters(ignore=['feature_extractor', 'classification_head', 'source_dataset', 'target_dataset'])
 
         self.track_grad_norm = track_grad_norm
         self.automatic_optimization = not self.track_grad_norm
@@ -44,7 +46,6 @@ class UDAModel(pl.LightningModule):
         self.pseudo_filter_threshold = pseudo_filter_threshold
         self.b = b
         self.lmbda = lmbda
-        self.test_size = test_size
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.pretrain_num_epochs = pretrain_num_epochs
@@ -111,28 +112,17 @@ class UDAModel(pl.LightningModule):
             "lr_scheduler": { "scheduler": scheduler },
         }
     
-    def _label_count(self, y):
-        y = torch.concat((y, torch.arange(self.n_classes, device=self.device)))
-        _, label_count_ = y.unique(dim=0, return_counts=True)
-
-        return label_count_ - 1
-    
     def calculate_class_centers(self):
         dataloader = self.dataloader_source_for_centroids()
 
         accum = torch.zeros((self.n_classes, self.feature_extractor.in_features), device=self.device)
-        labels_count = torch.zeros(self.n_classes, dtype=torch.long, device=self.device)
 
-        # TODO: may result in overflow. Rewrite with running mean.
         for x, y, y_real in dataloader:
             assert torch.all(y == y_real), 'y != y_real in calculate_class_centers'
             x = x.to(self.device)
             y = y.to(self.device)
             features = self.feature_extractor(x, 0)
-            
-            label_count_ = self._label_count(y)
-            labels_count += label_count_
-            
+
             y = y.view(y.size(0), 1).expand(-1, features.size(1))
 
             batch_class_means = torch.zeros_like(accum, dtype=torch.float32, device=self.device)\
@@ -140,6 +130,8 @@ class UDAModel(pl.LightningModule):
             accum += batch_class_means
             
 
+        labels_count = torch.from_numpy(np.bincount(self.train_source_dataset.labels, minlength=self.n_classes))
+        labels_count = labels_count.to(self.device)
         initial_centers = (accum / labels_count.float().unsqueeze(1)).cpu().numpy()
         initial_centers /= np.linalg.norm(initial_centers, axis=1)[:, np.newaxis]
 
@@ -236,7 +228,7 @@ class UDAModel(pl.LightningModule):
             # Filter out unwanted samples from training data. 
             self.filter_after_cluster(all_features, clusterizer.cluster_centers_)
             self.log('unique labels', len(np.unique(self.train_target_dataset.labels)))
-            
+
         self.feature_extractor.train()
 
     def classification_step(self, batch):
@@ -252,11 +244,10 @@ class UDAModel(pl.LightningModule):
 
         pred = self.classification_head(features)
 
-        with torch.no_grad():
-            probs = F.softmax(pred, dim=1)
-            probs = probs.max(dim=1).values.mean()
+        probs = F.softmax(pred.detach(), dim=1)
+        probs = probs.max(dim=1).values.mean().item()
 
-            self.log('mean_pred_prob', probs, on_epoch=True, on_step=False)
+        self.log('mean_pred_prob', probs, on_epoch=True, on_step=False)
 
         class_loss = self.classification_loss(pred, y)
         
@@ -482,10 +473,7 @@ class UDAModel(pl.LightningModule):
         source_for_classification, (source_x, source_y, source_y_real) = self.split_batch_in_two(batch['source'])
         assert torch.all(source_y == source_y_real), "y != y_real in training step"
 
-        if self.contrastive_only:
-            classification_loss = 0
-        else:
-            classification_loss = self.classification_step(source_for_classification)
+        classification_loss = self.classification_step(source_for_classification)
         
         if self.pretrain_num_epochs <= self.current_epoch:
             logger.info("Do contrastive step")
@@ -632,9 +620,11 @@ class UDAModel(pl.LightningModule):
             self.log(f"{domain_name}_val_loss", loss, on_epoch=True, on_step=False, add_dataloader_idx=False)
             self.log_dict(self.val_metrics(pred, y, domain_name), on_epoch=True, on_step=False, add_dataloader_idx=False)
             
+        # Evaluate source accuracy
         if dataloader_idx == 0:
             val_helper(batch, 'source', 0)
 
+        # Evaluate target accuracy
         elif dataloader_idx == 1:
             # When the model pretrains or we study no_adaptation setting, 
             # weights of target-specific batch norms are not trained because no samples are passed through them
