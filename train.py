@@ -144,7 +144,7 @@ def train_single_fold(fold_num, office_datasets=None, visda_datasets=None):
     cp = lambda x: tuple(map(lambda y: copy.deepcopy(y), x))
 
     dataset_pairs = [
-        ('aw', 31, cp(amazon_dataset), cp(webcam_dataset)),
+#        ('aw', 31, cp(amazon_dataset), cp(webcam_dataset)),
 #        ('ad', 31, cp(amazon_dataset), cp(dslr_dataset)),
 #        ('wa', 31, cp(webcam_dataset), cp(amazon_dataset)),
 #        ('wd', 31, cp(webcam_dataset), cp(dslr_dataset)),
@@ -156,9 +156,9 @@ def train_single_fold(fold_num, office_datasets=None, visda_datasets=None):
     training_modes = [
 #            ('no_adaptation', no_adaptation_setting, 3),
 #
-            ('baseline', baseline_setting, 0), 
+#            ('baseline', baseline_setting, 0), 
 #            ('smaller_lmbda_baseline', lambda x: smaller_lmbda_setting(baseline_setting(x)), 3),
-#            ('smaller_tau_lmbda_baseline', lambda x: smaller_tau_lmbda_setting(baseline_setting(x)), 5),
+            ('smaller_tau_lmbda_baseline', lambda x: smaller_tau_lmbda_setting(baseline_setting(x)), 3),
 #            ('smaller_tau_baseline', lambda x: smaller_tau_setting(baseline_setting(x)), 7),
 #            
 #            ('negative_sampling', negative_sampling_setting, 1), 
@@ -194,7 +194,7 @@ def train_single_fold(fold_num, office_datasets=None, visda_datasets=None):
                 settings['track_grad_norm'] = True
 
             # Default
-            version = f'{name}, {setting_name}, simulation_{fold_num}'
+            version = f'{name}, {setting_name}, fold_{fold_num}'
 
             # add checkpointing to amazon-webcam dataset
             if fold_num == 1 and 'aw' in version and not ('pretrain' in version or 'random_sampling' in version or 'no_adaptation' in version):
@@ -202,8 +202,7 @@ def train_single_fold(fold_num, office_datasets=None, visda_datasets=None):
             else:
                 model_ckpt = dict(save_last=False, save_top_k=0)
 
-#            with torch.autograd.detect_anomaly():
-            train(resnet, source, target, num_classes, settings, version, device, model_ckpt=model_ckpt, folder='shit')
+            train(resnet, source, target, num_classes, settings, version, device, model_ckpt=model_ckpt, folder='kfold_run')
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
