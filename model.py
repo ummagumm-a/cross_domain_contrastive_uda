@@ -1,5 +1,7 @@
 import torch
+import time
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split, SubsetRandomSampler
 from torch.optim.lr_scheduler import LambdaLR
 import pytorch_lightning as pl
@@ -16,13 +18,23 @@ logger.setLevel(logging.DEBUG)
 
 class UDAModel(pl.LightningModule):
     def __init__(self, feature_extractor, classification_head, n_classes, 
-                       source_dataset, target_dataset, 
-                       tau=1., b=0.75, test_size=0.3, lmbda=1.4, 
-                       explicit_negative_sampling_threshold=0.5,
+                       source_dataset, target_dataset, contrastive_only=False,
+                       tau=1., b=0.75, lmbda=1.4, 
+                       pseudo_filter_threshold=0.9, track_grad_norm=False,
+                       explicit_negative_sampling_threshold=0.5, grad_clip=1.5,
                        batch_size=64, num_workers=48, pretrain_num_epochs=0,
                        negative_sampling=None, remove_mismatched=False,
                        total_epochs=None, class_names=None):
         super().__init__()
+        self.save_hyperparameters(ignore=['feature_extractor', 'classification_head', 'source_dataset', 'target_dataset'])
+
+        self.track_grad_norm = track_grad_norm
+        self.automatic_optimization = not self.track_grad_norm
+        self.grad_clip = grad_clip
+        
+        self.contrastive_only = contrastive_only
+        assert not (contrastive_only and pretrain_num_epochs > 0)
+
         self.n_classes = n_classes
         # The last layer should be smth giving (N, out_features)
         self.feature_extractor = feature_extractor
@@ -31,9 +43,9 @@ class UDAModel(pl.LightningModule):
         
         self.tau = tau
         self.explicit_negative_sampling_threshold = explicit_negative_sampling_threshold
+        self.pseudo_filter_threshold = pseudo_filter_threshold
         self.b = b
         self.lmbda = lmbda
-        self.test_size = test_size
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.pretrain_num_epochs = pretrain_num_epochs
@@ -45,24 +57,11 @@ class UDAModel(pl.LightningModule):
         
         self.train_source_dataset, self.val_source_dataset = source_dataset
         self.train_target_dataset, self.val_target_dataset = target_dataset
-
-        self.source_class_indices = self.find_class_indices(self.train_source_dataset)
-        self.target_class_indices = None
+        self.valid_target_samples = list(range(len(self.train_target_dataset)))
         
-        self.accuracy_metric = torchmetrics.Accuracy(num_classes=n_classes, average=None)
+        self.accuracy_metric = torchmetrics.Accuracy(task='multiclass', num_classes=n_classes, average=None)
         #self.precision_metric = torchmetrics.Precision(num_classes=n_classes, average=None)
         #self.recall_metric = torchmetrics.Recall(num_classes=n_classes, average=None)
-        
-        self.clusterizer = KMeans(n_clusters=self.n_classes, n_init=1)
-
-    def find_class_indices(self, dataset):
-        class_indices = [[] for _ in dataset.get_class_names()]
-    
-        labels = enumerate(dataset.get_labels())
-        for i, l in labels:
-            class_indices[l].append(i)
-
-        return class_indices
         
     def check_class_names(self, class_names):
         if class_names is None:
@@ -75,7 +74,7 @@ class UDAModel(pl.LightningModule):
         Checks correctness of 'negative_sampling' parameter.
         """
         
-        negative_sampling_options = [None, 'soft', 'hard']
+        negative_sampling_options = [None, 'soft', 'hard', 'random']
         if negative_sampling in negative_sampling_options:
             return negative_sampling
         else:
@@ -112,27 +111,17 @@ class UDAModel(pl.LightningModule):
             "lr_scheduler": { "scheduler": scheduler },
         }
     
-    def _label_count(self, y):
-        y = torch.concat((y, torch.arange(self.n_classes, device=self.device)))
-        _, label_count_ = y.unique(dim=0, return_counts=True)
-
-        return label_count_ - 1
-    
     def calculate_class_centers(self):
         dataloader = self.dataloader_source_for_centroids()
 
         accum = torch.zeros((self.n_classes, self.feature_extractor.in_features), device=self.device)
-        labels_count = torch.zeros(self.n_classes, dtype=torch.long, device=self.device)
 
-        # TODO: may result in overflow. Rewrite with running mean.
-        for x, y, _ in dataloader:
+        for x, y, y_real in dataloader:
+            assert torch.all(y == y_real), 'y != y_real in calculate_class_centers'
             x = x.to(self.device)
             y = y.to(self.device)
             features = self.feature_extractor(x, 0)
-            
-            label_count_ = self._label_count(y)
-            labels_count += label_count_
-            
+
             y = y.view(y.size(0), 1).expand(-1, features.size(1))
 
             batch_class_means = torch.zeros_like(accum, dtype=torch.float32, device=self.device)\
@@ -141,11 +130,14 @@ class UDAModel(pl.LightningModule):
 
             
 
-        initial_centers = accum / labels_count.float().unsqueeze(1)
+        labels_count = torch.from_numpy(np.bincount(self.train_source_dataset.labels, minlength=self.n_classes))
+        labels_count = labels_count.to(self.device)
+        initial_centers = (accum / labels_count.float().unsqueeze(1)).cpu().numpy()
+        initial_centers /= np.linalg.norm(initial_centers, axis=1)[:, np.newaxis]
 
-        self.clusterizer.set_params(init=initial_centers.cpu())
+        return initial_centers
 
-    def fit_clusterizer(self):
+    def get_target_features(self):
         dataloader = self.dataloader_target_for_clustering()
         all_features = []
         for x, _, _ in dataloader:
@@ -154,41 +146,22 @@ class UDAModel(pl.LightningModule):
             features = features.cpu().numpy()
             all_features.append(features)
         all_features = np.vstack(all_features)
-        
-        self.clusterizer.fit(all_features)
-    
-    def assign_labels(self):
-        dataloader = self.dataloader_target_for_clustering()
 
-        collected_labels = []
-        for x, _, _ in dataloader:
-            x = x.to(self.device)
-            features = self.feature_extractor(x, 1)
-            features = features.cpu().numpy()
+        return all_features
 
-            pred = self.clusterizer.predict(features)
-            collected_labels.append(pred)
-
-        return np.hstack(collected_labels)
-    
     def visualize_pseudo_labeling(self):
-        real_labels, labels = [], []
-        for i in range(len(self.train_target_dataset)):
-            real_labels.append(self.train_target_dataset.get_real_labels()[i])
-            labels.append(self.train_target_dataset.get_labels()[i])
+        real_labels = self.train_target_dataset.real_labels
+        labels = self.train_target_dataset.labels
 
-        real_labels, labels = np.array(real_labels), np.array(labels)
         pairs = np.vstack((real_labels, labels))
         unique_pairs, counts = np.unique(pairs, axis=1, return_counts=True)
         fig = px.scatter_3d(x=unique_pairs[0, :], y=unique_pairs[1, :], z=counts)
         fig.show()
         
     def class_analysis(self, dataset):
-        labels = dataset.get_labels()
-        labels = np.array(labels)
-        real_labels = dataset.get_real_labels()
-        real_labels = np.array(real_labels)
-        self.logger.experiment.add_scalar(f'Mislabeled fraction', np.sum(labels != real_labels) / len(labels), self.current_epoch)
+        labels = dataset.labels
+        real_labels = dataset.real_labels
+        self.logger.experiment.add_scalar(f'Mislabeled fraction', np.mean(labels != real_labels), self.current_epoch)
 
         # find unassigned labels
         # unassigned_labels = set(range(31)).difference(np.unique(labels).tolist())
@@ -206,39 +179,83 @@ class UDAModel(pl.LightningModule):
         #                                          bins=31)
         #     self.logger.experiment.add_scalar(f'Class {i} mislabeled fraction', (ilabels != i).sum() / len(ilabels), self.current_epoch)
             
+
+    def filter_after_cluster(self, features, centers):
+        # Normalize the centers so they are on the unit-sphere
+        centers /= np.linalg.norm(centers, axis=1)[:, np.newaxis]
+        # Calculate similarities between target features and cluster centers
+        sims = features @ centers.T
+        # Similarity with the closest cluster center
+        max_sims = sims.max(axis=1)
+        assert len(max_sims) == len(features)
+        # Take only samples which are 'close enough' to class centroids
+        mask = max_sims > self.pseudo_filter_threshold
+        self.logger.experiment.add_scalar(f'Close enough targets', np.sum(mask), self.current_epoch)
+
+        # If the setting is to not allow mislabeled samples in training dataset
+        if self.remove_mismatched:
+            mismatch_mask = self.train_target_dataset.real_labels == self.train_target_dataset.labels
+            
+            mask &= mismatch_mask
+
+        # Save indices of valid samples - they are 'close enough' (and optionally, are not mislabeled)
+        # This list will be used in 'train_dataloader' function
+        self.valid_target_samples = np.arange(len(self.train_target_dataset))[mask]
+        np.random.shuffle(self.valid_target_samples)
+
+        self.logger.experiment.add_scalar(f'Remaining targets', np.sum(mask), self.current_epoch)
+
     def on_train_epoch_start(self):
 #        if self.pretrain_num_epochs <= self.current_epoch:
         logger.info("Do pseudo-labeling")
         self.feature_extractor.eval()
-        if self.remove_mismatched:
-            logger.info("Remove mismatched reset")
-            self.train_target_dataset.reset()
 
+        # Define a clusterizer
+        clusterizer = KMeans(n_clusters=self.n_classes, n_init=1)
         with torch.no_grad():
-            self.calculate_class_centers()
-            self.fit_clusterizer()
-            assigned_labels = self.assign_labels()
-            self.train_target_dataset.update_labels(assigned_labels)
-#            self.visualize_pseudo_labeling()
+            # Calculate class centroids on the source domain
+            initial_centers = self.calculate_class_centers()
+            # Initialize cluster positions
+            clusterizer.set_params(init=initial_centers)
+            # Collect features for target samples
+            all_features = self.get_target_features()
+            # Do clusterization
+            clusterizer.fit(all_features)
+            # Update target labels
+            self.train_target_dataset.labels = clusterizer.labels_
+            # Log stats about the results of pseudo-labeling
             self.class_analysis(self.train_target_dataset)
-            self.log('unique labels', len(np.unique(self.train_target_dataset.get_labels())))
-            
-        self.target_class_indices = self.find_class_indices(self.train_target_dataset)
+
+            # Filter out unwanted samples from training data. 
+            self.filter_after_cluster(all_features, clusterizer.cluster_centers_)
+            self.log('unique labels', len(np.unique(self.train_target_dataset.labels)))
+
         self.feature_extractor.train()
 
     def classification_step(self, batch):
-        source_x, source_y, source_y_real = batch
-        assert torch.all(source_y == source_y_real), "y != y_real in classification step"
+        x, y, y_real = batch
+        assert torch.all(y == y_real), "y != y_real in classification step"
         
-        pred = self(source_x, 0)
-        logger.debug(f"Pred shape: {pred.shape}, {source_y.shape}")
-        class_loss = self.classification_loss(pred, source_y)
+        features = self.feature_extractor(x, 0)
+        if self.contrastive_only:
+            # In contrastive only mode I want only contrastive loss to have impact on feature encoder weights.
+            # Therefore, I detach 'features' from the computation graph, so classification loss impacts only classification head.
+            logger.info("contrastive_only - Detach features")
+            features = features.detach()
+
+        pred = self.classification_head(features)
+
+        probs = F.softmax(pred.detach(), dim=1)
+        probs = probs.max(dim=1).values.mean().item()
+
+        self.log('mean_pred_prob', probs, on_epoch=True, on_step=False)
+
+        class_loss = self.classification_loss(pred, y)
         
         return class_loss
     
     def get_same_class(self, batch, cls):
         x, y, _ = batch
-        logger.debug(f"Same class: {y.shape}, {len(y == cls)}, {x.shape}, {len(x[y == cls])}, X_same: {x[y == cls]}, Y: {y}, X: {x}")
         return x[y == cls]
     
     def analyze_negative_samples(self, anchor, negatives, positives, anchor_type):
@@ -389,10 +406,20 @@ class UDAModel(pl.LightningModule):
         
         if self.negative_sampling is None:
             return negatives_sims
+
         elif self.negative_sampling == 'soft':
-            return negatives_sims * torch.detach(negatives_sims < self.explicit_negative_sampling_threshold)
+            indices = negatives_sims < self.explicit_negative_sampling_threshold
+            return negatives_sims[indices]
+
         elif self.negative_sampling == 'hard':
-            return negatives_sims * torch.detach(negatives_sims > self.explicit_negative_sampling_threshold)
+            indices = negatives_sims > self.explicit_negative_sampling_threshold
+            return negatives_sims[indices]
+
+        elif self.negative_sampling == 'random':
+            num_negs = torch.sum(negatives_sims > self.explicit_negative_sampling_threshold)
+            indices = torch.randperm(len(negatives_sims))[:num_negs]
+            
+            return negatives_sims[indices]
         else:
             raise Exception(f"Wrong negative sampling option {negative_sampling}. Available options are: {negative_sampling_options}.")
     
@@ -473,10 +500,11 @@ class UDAModel(pl.LightningModule):
         assert abs(len(x1) - len(x2)) <= 1, f'{abs(len(x1) - len(x2))}'
         
         return (x1, y1, y_real1), (x2, y2, y_real2)
-    
-    def training_step(self, batch):
+
+    def compute_losses(self, batch):
         source_for_classification, (source_x, source_y, source_y_real) = self.split_batch_in_two(batch['source'])
         assert torch.all(source_y == source_y_real), "y != y_real in training step"
+
         classification_loss = self.classification_step(source_for_classification)
         
         if self.pretrain_num_epochs <= self.current_epoch:
@@ -499,10 +527,94 @@ class UDAModel(pl.LightningModule):
 
         else:
             logger.info("Don't do contrastive step")
-            contrastive_loss = -1
+            contrastive_loss = 0
 
-        train_loss = classification_loss + self.lmbda * contrastive_loss
-        
+        return classification_loss, contrastive_loss
+
+    def extract_gradients(self):
+        grads = []
+        for i, (name, param) in enumerate(self.feature_extractor.named_parameters()):
+            grads.append(param.grad)
+
+        for i, (name, param) in enumerate(self.classification_head.named_parameters()):
+            grads.append(param.grad)
+
+        return grads
+
+    def sum_gradients(self, grads1, grads2):
+        grads = []
+        for grad1, grad2 in zip(grads1, grads2):
+            if grad1 is None and grad2 is None:
+                grads.append(None)
+            # why there can be a None value in one grad but not in the other?
+            # These are the gradients of DSBN. Classification doesn't use target-specific BN, so no gradients will be there.
+            elif grad1 is None or grad2 is None:
+                if grad1 is not None:
+                    grads.append(grad1)   
+                elif grad2 is not None:
+                    grads.append(grad2)   
+
+            else:
+                grads.append(grad1 + grad2)
+
+        return grads
+
+    def set_gradients(self, grads):
+        for i, (param, grad) in enumerate(zip(self.feature_extractor.parameters(), grads)):
+            param.grad = grad
+
+        for param, grad in zip(self.classification_head.parameters(), grads[i + 1:]):
+            param.grad = grad
+
+    def log_grad_norm(self, grads, name):
+        nonnan_grads = list(map(lambda x: x.flatten(), filter(lambda x: x is not None, grads)))
+
+        grad_norm = torch.hstack(nonnan_grads).norm(2).detach()
+        self.logger.experiment.add_scalar(f'{name} loss grad norm', grad_norm, self.global_step)
+
+    def training_step(self, batch):
+        classification_loss, contrastive_loss = self.compute_losses(batch)
+        contrastive_loss *= self.lmbda
+        train_loss = classification_loss + contrastive_loss
+
+        if self.track_grad_norm:
+            opt = self.optimizers()
+            sch = self.lr_schedulers()
+
+            # Calculate gradient norms for each loss separately
+            opt.zero_grad()
+            if float != type(contrastive_loss):
+                self.manual_backward(contrastive_loss, retain_graph=True)
+                with torch.no_grad():
+                    grads2 = self.extract_gradients()
+                    self.log_grad_norm(grads2, "Contrastive")
+            else:
+                self.logger.experiment.add_scalar(f'Contrastive loss grad norm', 0, self.global_step)
+
+            opt.zero_grad()
+            self.manual_backward(classification_loss, retain_graph=True)
+            with torch.no_grad():
+                grads1 = self.extract_gradients()
+                self.log_grad_norm(grads1, "Classification")
+
+    #        sum_grads = self.sum_gradients(grads1, grads2)
+    #        self.log_grad_norm(grads2, "Total Test")
+
+            # Calculate gradient on a combined loss
+            opt.zero_grad()
+            self.manual_backward(train_loss)
+            with torch.no_grad():
+                grads = self.extract_gradients()
+                self.log_grad_norm(grads, "Total")
+
+            # Make a step
+            self.clip_gradients(opt, gradient_clip_val=self.grad_clip, gradient_clip_algorithm="norm")
+            opt.step()
+
+            # Learning rate scheduler step
+            if self.trainer.is_last_batch:
+                sch.step()
+
         self.log_dict({
             "classification_loss": classification_loss,
             "contrastive_loss": contrastive_loss,
@@ -530,27 +642,31 @@ class UDAModel(pl.LightningModule):
         return log_dict
 
     def validation_step(self, batch, batch_idx, dataloader_idx):
-        x, y, y_real = batch
-        assert torch.all(y == y_real), f"y != y_real in validation step ({dataloader_idx})"
+        def val_helper(batch, domain_name, dsbn_index):
+            x, y, y_real = batch
+            assert torch.all(y == y_real), f"y != y_real in validation step ({dataloader_idx})"
 
+            pred = self(x, dsbn_index)
+            loss = self.classification_loss(pred, y)
+
+            self.log(f"{domain_name}_val_loss", loss, on_epoch=True, on_step=False, add_dataloader_idx=False)
+            self.log_dict(self.val_metrics(pred, y, domain_name), on_epoch=True, on_step=False, add_dataloader_idx=False)
+            
+        # Evaluate source accuracy
         if dataloader_idx == 0:
-            source_x, source_y, source_y_real = x, y, y_real
-            # Source metrics
-            source_pred = self(source_x, 0)
-            loss = self.classification_loss(source_pred, source_y)
+            val_helper(batch, 'source', 0)
 
-            self.log("source_val_loss", loss, on_epoch=True, on_step=False, add_dataloader_idx=False)
-            self.log_dict(self.val_metrics(source_pred, source_y, 'source'), on_epoch=True, on_step=False, add_dataloader_idx=False)
-        if dataloader_idx == 1:
-            target_x, target_y, target_y_real = x, y, y_real
-            # Target metrics
-            target_pred = self(target_x, 1)
-            loss = self.classification_loss(target_pred, target_y)
+        # Evaluate target accuracy
+        elif dataloader_idx == 1:
+            # When the model pretrains or we study no_adaptation setting, 
+            # weights of target-specific batch norms are not trained because no samples are passed through them
+            # Also, it must be evident that 'no_adaptation' means no adaptation techniques at all, so we should remove DSBN factor from model evaluation.
+            dsbn_index = int(self.pretrain_num_epochs <= self.current_epoch)
+            logger.info(f"Use dsbn_index {dsbn_index} on epoch {self.current_epoch} because model is pretrained for {self.pretrain_num_epochs} epochs")
 
-            self.log("target_val_loss", loss, on_epoch=True, on_step=False, add_dataloader_idx=False)
-            self.log_dict(self.val_metrics(target_pred, target_y, 'target'), on_epoch=True, on_step=False, add_dataloader_idx=False)
+            val_helper(batch, 'target', dsbn_index)
 
-        if dataloader_idx not in [0, 1]:
+        elif dataloader_idx not in [0, 1]:
             raise Exception(f'weird dataloader num: {dataloader_idx}')
         
     def dataloader_target_for_clustering(self):
@@ -564,7 +680,7 @@ class UDAModel(pl.LightningModule):
         return DataLoader(self.train_source_dataset,
                           batch_size=self.batch_size,
                           pin_memory=True,
-                          shuffle=True,
+                          shuffle=False,
                           num_workers=self.num_workers)
 
     def dataloader_by_class(self, dataset, indices):
@@ -588,7 +704,7 @@ class UDAModel(pl.LightningModule):
                             DataLoader(self.train_target_dataset,
                                        batch_size=self.batch_size,
                                        pin_memory=True,
-                                       shuffle=True,
+                                       sampler=SubsetRandomSampler(self.valid_target_samples),
                                        num_workers=self.num_workers)
         
         return dataloaders

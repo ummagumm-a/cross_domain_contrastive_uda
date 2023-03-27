@@ -1,82 +1,127 @@
 import torchvision.transforms as T
 import pytorch_lightning as pl
 from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
-from resnetdsbn import resnet50dsbn
+from resnetdsbn import resnet50dsbn, resnet101dsbn
 from utils import FeatureNormL2
-from dataset import UDADataset, RemoveMismatchedAdapter
+from dataset import UDADataset, make_office_datasets_kfold, get_visda_datasets
 from model import UDAModel
 import torch.nn as nn
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks import ModelCheckpoint, DeviceStatsMonitor, StochasticWeightAveraging
 import torch
+torch.backends.cudnn.benchmark = True
 import logging
 from torchvision.models import ResNet50_Weights
 import os
 import copy
 
-def baseline_setting():
-    return dict(
-        pretrain_num_epochs = 0,
-        explicit_negative_sampling_threshold = 0.0,
-        negative_sampling = None,
-        tau = 1.0,
-        )
 
-def no_adaptation_setting():
-    return dict(
-        pretrain_num_epochs = 10000,
-        explicit_negative_sampling_threshold = 0.0,
-        negative_sampling = None,
-        tau = 1.0,
-        )
+def default_office_params():
+    params = {}
+    params['batch_size'] = 84
+    params['tau'] = 1.0
+    params['b'] = 0.75
 
-def negative_sampling_setting():
-    return dict(
-        pretrain_num_epochs = 0,
-        explicit_negative_sampling_threshold = 0.5,
-        negative_sampling = 'hard',
-        tau = 1.0,
-        )
+    params['explicit_negative_sampling_threshold'] = 0.0
+    params['negative_sampling'] = None
+    params['pretrain_num_epochs'] = 0
 
-def pretrain_on_source_setting():
-    return dict(
-        pretrain_num_epochs = 100,
-        explicit_negative_sampling_threshold = 0.0,
-        negative_sampling = None,
-        tau = 1.0,
-        )
+    return params
 
-def train(source_dataset, target_dataset, num_classes, settings, version, device, total_epochs=400, remove_mismatched=False):
+def default_visda_params():
+    params = {}
+    params['batch_size'] = 64
+    params['tau'] = 0.05
+    params['b'] = 2.25
+
+    params['explicit_negative_sampling_threshold'] = 0.0
+    params['negative_sampling'] = None
+    params['pretrain_num_epochs'] = 0
+
+    return params
+
+def baseline_setting(default_params):
+    return default_params
+
+def no_adaptation_setting(default_params):
+    default_params['pretrain_num_epochs'] = 10000
+
+    return default_params
+
+def negative_sampling_setting(default_params):
+    default_params['negative_sampling'] = 'hard'
+    default_params['explicit_negative_sampling_threshold'] = 0.5
+
+    return default_params
+
+def random_negative_sampling_setting(default_params):
+    default_params['negative_sampling'] = 'random'
+    default_params['explicit_negative_sampling_threshold'] = 0.5
+
+    return default_params
+
+def pretrain_on_source_setting(default_params):
+    default_params['pretrain_num_epochs'] = 100
+
+    return default_params
+
+def remove_mismatched_setting(default_params):
+    default_params['remove_mismatched'] = True
+
+    return default_params
+
+def contrastive_only_setting(default_params):
+    default_params['contrastive_only'] = True
+
+    return default_params
+
+def smaller_lmbda_setting(default_params):
+    default_params['lmbda'] = 0.1
+
+    return default_params
+
+def smaller_tau_setting(default_params):
+    default_params['tau'] = 0.05
+
+    return default_params
+
+def greater_tau_setting(default_params):
+    # TODO: change to 1.0
+    default_params['tau'] = 1.0
+
+    return default_params
+
+def smaller_tau_lmbda_setting(default_params):
+    default_params['tau'] = 0.05
+    default_params['lmbda'] = 0.1
+
+    return default_params
+
+def train(resnet, source_dataset, target_dataset, num_classes, settings, version, device, model_ckpt, total_epochs=500, folder='shit'):
+
+    logger.info(f"Training settings: \n{settings}")
     # Define the backbone
-    resnet = resnet50dsbn(pretrained=True, in_features=256)
-    resnet.fc2 = FeatureNormL2()
     classification_head = nn.Linear(resnet.in_features, num_classes, bias=False)
 
-    if remove_mismatched:
-        target_dataset = tuple(map(RemoveMismatchedAdapter, target_dataset))
-
     model = UDAModel(resnet, classification_head, num_classes, 
-                     source_dataset, target_dataset, 
-                     total_epochs=total_epochs, batch_size=64,
-                     num_workers=1, **settings,
-                     remove_mismatched=remove_mismatched,
+                     source_dataset, target_dataset,
+                     total_epochs=total_epochs, 
+                     num_workers=6, **settings, grad_clip=1.5,
                      class_names=source_dataset[0].get_class_names())
 
-    tb_logger = TensorBoardLogger('lightning_logs', '23_repaired', version=version)
+    tb_logger = TensorBoardLogger('lightning_logs', folder, version=version)
 
-    # add checkpointing to amazon-webcam dataset
-    if 'aw' in version:
-        model_ckpt = dict(save_last=True, save_top_k=1, every_n_epochs=333)
-    else:
-        model_ckpt = dict(save_last=False, save_top_k=0, every_n_epochs=None)
+
+    grad_norm = 1.5
+    if 'track_grad_norm' in settings and settings['track_grad_norm']:
+        grad_norm = None
 
     trainer = pl.Trainer(accelerator='gpu', devices=[device],
                          max_epochs=total_epochs,
                          logger=tb_logger,
-                         # track_grad_norm=2, 
-                         gradient_clip_val=1.5,
-                         log_every_n_steps=16,
+                         log_every_n_steps=13,
+                         gradient_clip_val=grad_norm,
                          multiple_trainloader_mode='max_size_cycle',
                          callbacks=[
                              ModelCheckpoint(monitor='source_val_loss', 
@@ -86,120 +131,92 @@ def train(source_dataset, target_dataset, num_classes, settings, version, device
                          ]
                         )
 
-#     ckpt_path = 'lightning_logs/final/shit_check/checkpoints/last.ckpt'
-#     checkpoint = torch.load(ckpt_path, map_location='cpu')
-#     global_step_offset = checkpoint["global_step"]
-#     trainer.fit_loop.epoch_loop._batches_that_stepped = global_step_offset
-#     del checkpoint
-#     trainer.fit(model, ckpt_path=ckpt_path)
     trainer.fit(model)
-    
-
-def make_datasets(transform):
-    amazon_train_dataset = UDADataset(
-        os.path.join('datasets', 'OFFICE31', 'amazon_train'), 
-        transform=transform
-    )
-    amazon_val_dataset = UDADataset(
-        os.path.join('datasets', 'OFFICE31', 'amazon_val'), 
-        transform=transform
-    )
-    webcam_train_dataset = UDADataset(
-        os.path.join('datasets', 'OFFICE31', 'webcam_train'), 
-        transform=transform
-    )
-    webcam_val_dataset = UDADataset(
-        os.path.join('datasets', 'OFFICE31', 'webcam_val'), 
-        transform=transform
-    )
-    dslr_train_dataset = UDADataset(
-        os.path.join('datasets', 'OFFICE31', 'dslr_train'), 
-        transform=transform
-    )
-    dslr_val_dataset = UDADataset(
-        os.path.join('datasets', 'OFFICE31', 'dslr_val'),
-        transform=transform
-    )
-    
-    visda_source_train_dataset = UDADataset(
-        os.path.join('datasets', 'visda', 'source_train'), 
-        transform=transform
-    )
-    visda_source_val_dataset = UDADataset(
-        os.path.join('datasets', 'visda', 'source_val'), 
-        transform=transform
-    )
-    
-    visda_target_train_dataset = UDADataset(
-        os.path.join('datasets', 'visda', 'target_train'), 
-        transform=transform
-    )
-    visda_target_val_dataset = UDADataset(
-        os.path.join('datasets', 'visda', 'target_val'), 
-        transform=transform
-    )
-    
-    return (amazon_train_dataset, amazon_val_dataset), \
-           (webcam_train_dataset, webcam_val_dataset), \
-           (dslr_train_dataset, dslr_val_dataset), \
-           (visda_source_train_dataset, visda_source_val_dataset), \
-           (visda_target_train_dataset, visda_target_val_dataset)
 
 
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
-#    pl.seed_everything(41)
-    num_simulations = 1
+def train_single_fold(fold_num, office_datasets=None, visda_datasets=None):
+    if office_datasets is not None:
+        amazon_dataset, webcam_dataset, dslr_dataset = datasets
 
-#    transform = T.Compose([
-#        T.Resize((300, 300)), 
-#        T.ToTensor(),
-##         T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
-#        ])
-    
-    # transforms that are suitable for the pretrained model
-    transform = ResNet50_Weights.DEFAULT.transforms()
-    amazon_dataset, webcam_dataset, dslr_dataset, visda_source, visda_target = make_datasets(transform)
+    if visda_datasets is not None:
+        visda_source, visda_target = visda_datasets
 
     cp = lambda x: tuple(map(lambda y: copy.deepcopy(y), x))
 
     dataset_pairs = [
-        ('aw', 31, cp(amazon_dataset), cp(webcam_dataset)),
-        ('ad', 31, cp(amazon_dataset), cp(dslr_dataset)),
-        ('wa', 31, cp(webcam_dataset), cp(amazon_dataset)),
-        ('wd', 31, cp(webcam_dataset), cp(dslr_dataset)),
-        ('da', 31, cp(dslr_dataset), cp(amazon_dataset)),
-        ('dw', 31, cp(dslr_dataset), cp(webcam_dataset)),
+#        ('aw', 31, cp(amazon_dataset), cp(webcam_dataset)),
+#        ('ad', 31, cp(amazon_dataset), cp(dslr_dataset)),
+#        ('wa', 31, cp(webcam_dataset), cp(amazon_dataset)),
+#        ('wd', 31, cp(webcam_dataset), cp(dslr_dataset)),
+#        ('da', 31, cp(dslr_dataset), cp(amazon_dataset)),
+#        ('dw', 31, cp(dslr_dataset), cp(webcam_dataset)),
 #        ('visda', 12, cp(visda_source), cp(visda_target)),
         ]
 
     training_modes = [
-#            ('005_baseline', baseline_setting, 3), 
-#            ('baseline', baseline_setting, 7), 
-#            ('negative_sampling', negative_sampling_setting, 6), 
-#            ('pretrain', pretrain_on_source_setting, 5),
-            ('no_adaptation', no_adaptation_setting, 4)
-
+#            ('no_adaptation', no_adaptation_setting, 3),
+#
+#            ('baseline', baseline_setting, 0), 
+#            ('smaller_lmbda_baseline', lambda x: smaller_lmbda_setting(baseline_setting(x)), 3),
+            ('smaller_tau_lmbda_baseline', lambda x: smaller_tau_lmbda_setting(baseline_setting(x)), 3),
+#            ('smaller_tau_baseline', lambda x: smaller_tau_setting(baseline_setting(x)), 7),
+#            
+#            ('negative_sampling', negative_sampling_setting, 1), 
+#            ('smaller_lmbda_neg_sampl', lambda x: smaller_lmbda_setting(negative_sampling_setting(x)), 1),
+#            ('smaller_tau_lmbda_neg_sampl', lambda x: smaller_tau_lmbda_setting(negative_sampling_setting(x)), 1),
+#            
+#            ('pretrain', pretrain_on_source_setting, 1),
+#            ('smaller_lmbda_pretrain', lambda x: smaller_lmbda_setting(pretrain_on_source_setting(x)), 1),
+#
+#            ('random_sampling', random_negative_sampling_setting, 6),
+#            ('remove_mismatched', lambda x: remove_mismatched_setting(baseline_setting(x)), 4),
+#            ('remove_mismatched_smaller_lmbda', lambda x: remove_mismatched_setting(smaller_lmbda_setting(baseline_setting(x))), 4),
+#            ('contrastive_only', lambda x: contrastive_only_setting(baseline_setting(x)), 5),
+#            ('greater_tau_neg_sampl', lambda x: greater_tau_setting(negative_sampling_setting(x)), 6),
+#            ('greater_tau_baseline', lambda x: greater_tau_setting(baseline_setting(x)), 4),
        ]
-    
-    # Run training for several simulations to obtain more reliable results
-    for i in range(num_simulations):
-        # For each source-target pair
-        for name, num_classes, source, target in dataset_pairs:
-            # defines which mode of training to use
-            for setting_name, training_mode, device in training_modes:
-                settings = training_mode()
-                version = f'{name}, {setting_name}, simulation_{i}'
-
-                train(source, target, num_classes, settings, version, device)
-                if name == 'aw' and setting_name == 'baseline':
-                    version = f'{name}, remove_mismatched, simulation_{i}'
-                    train(source, target, num_classes, settings, version, device, remove_mismatched=True)
 
 
-#    ckpt_path = 'lightning_logs/lightning_logs/baseline/checkpoints/last-v2.ckpt'
-#    checkpoint = torch.load(ckpt_path, map_location='cpu')
-#    global_step_offset = checkpoint["global_step"]
-#    trainer.fit_loop.epoch_loop._batches_that_stepped = global_step_offset
-#    del checkpoint
-#    trainer.fit(model, ckpt_path=ckpt_path)
+    # For each source-target pair
+    for name, num_classes, source, target in dataset_pairs:
+        # defines which mode of training to use
+        for setting_name, training_mode, device in training_modes:
+            if name == 'visda':
+                resnet = resnet101dsbn(pretrained=True, in_features=256)
+                default_settings = default_visda_params()
+            else:
+                resnet = resnet50dsbn(pretrained=True, in_features=256)
+                default_settings = default_office_params()
+
+            resnet.fc2 = FeatureNormL2()
+            settings = training_mode(default_settings)
+            if fold_num == 0:
+                settings['track_grad_norm'] = True
+
+            # Default
+            version = f'{name}, {setting_name}, fold_{fold_num}'
+
+            # add checkpointing to amazon-webcam dataset
+            if fold_num == 1 and 'aw' in version and not ('pretrain' in version or 'random_sampling' in version or 'no_adaptation' in version):
+                model_ckpt = dict(save_last=True, save_top_k=4, every_n_epochs=100)
+            else:
+                model_ckpt = dict(save_last=False, save_top_k=0)
+
+            train(resnet, source, target, num_classes, settings, version, device, model_ckpt=model_ckpt, folder='kfold_run')
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+#    pl.seed_everything(41)
+
+    # transforms that are suitable for the pretrained model
+    transform = ResNet50_Weights.DEFAULT.transforms()
+
+    # For all splits
+    for i, datasets in enumerate(make_office_datasets_kfold(transform, n_splits=4)):
+        train_single_fold(i, office_datasets=datasets)
+
+#    transform = ResNet101_Weights.DEFAULT.transforms()
+#    train_single_fold(1, visda_datasets=get_visda_datasets(transform))
+

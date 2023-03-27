@@ -11,3 +11,4 @@ nohup.out
 *.jpg
 *.png
 training_logs/
+*.logs
