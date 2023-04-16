@@ -63,7 +63,6 @@ class UDAModel(pl.LightningModule):
         #self.precision_metric = torchmetrics.Precision(num_classes=n_classes, average=None)
         #self.recall_metric = torchmetrics.Recall(num_classes=n_classes, average=None)
         
-        
     def check_class_names(self, class_names):
         if class_names is None:
             class_names = np.arange(self.n_classes)
@@ -128,6 +127,7 @@ class UDAModel(pl.LightningModule):
             batch_class_means = torch.zeros_like(accum, dtype=torch.float32, device=self.device)\
                                      .scatter_add_(0, y, features)
             accum += batch_class_means
+
             
 
         labels_count = torch.from_numpy(np.bincount(self.train_source_dataset.labels, minlength=self.n_classes))
@@ -225,6 +225,7 @@ class UDAModel(pl.LightningModule):
             self.train_target_dataset.labels = clusterizer.labels_
             # Log stats about the results of pseudo-labeling
             self.class_analysis(self.train_target_dataset)
+
             # Filter out unwanted samples from training data. 
             self.filter_after_cluster(all_features, clusterizer.cluster_centers_)
 #            self.log('unique labels', len(np.unique(self.train_target_dataset.labels)))
@@ -423,20 +424,34 @@ class UDAModel(pl.LightningModule):
             raise Exception(f"Wrong negative sampling option {negative_sampling}. Available options are: {negative_sampling_options}.")
     
     def contrastive_step(self, anchors_batch, other_batch, anchor_type):
-        other_feat, other_y, other_y_real = other_batch
-        
+        if anchor_type == 'target':
+            other_dataset, other_class_indices, other_index = self.train_source_dataset, self.source_class_indices, 0
+        elif anchor_type == 'source':
+            other_dataset, other_class_indices, other_index = self.train_target_dataset, self.target_class_indices, 1
+        else:
+            raise Exception("Wrong anchor_type in contrastive_step")
+
+        other_feat, other_y, _ = other_batch
+        anchor_feat, anchor_y, _ = anchors_batch
+
         contrastive_loss = 0
-        for feat, y, y_real in zip(*anchors_batch):
-            same_class_indices = other_y == y
+        for i in range(self.n_classes):
+            anchor_same_class_indices = anchor_y == i
+            feat_i = anchor_feat[anchor_same_class_indices]
+        
+        #for feat, y, y_real in zip(*anchors_batch):
+            same_class_indices = other_y == i
             if not same_class_indices.any():
                 continue
 
             positives = other_feat[same_class_indices]
             negatives = other_feat[~same_class_indices]
 
-            positives_sims = positives @ feat
+            # positives_sims = positives @ feat
+            positives_sims = positives @ torch.t(feat_i)
             positives_exp = torch.exp(positives_sims / self.tau)
-            negatives_sims = negatives @ feat
+            # negatives_sims = negatives @ feat
+            negatives_sims = negatives @ torch.t(feat_i)
 #             self.analyze_negative_samples((feat, y, y_real), 
 #                                           (negatives_sims, other_y[~same_class_indices], other_y_real[~same_class_indices]),
 #                                           (positives_sims, other_y[same_class_indices], other_y_real[same_class_indices]),
@@ -446,14 +461,31 @@ class UDAModel(pl.LightningModule):
             negatives_sims = self._filter_negative_samples(negatives_sims)
             negatives_exp = torch.exp(negatives_sims / self.tau)
 
-            logit = positives_exp / (negatives_exp.sum() + positives_exp.sum())
-            log = torch.log(logit)
-            sum_over_all_positives = torch.nanmean(log)
+            denominator = negatives_exp.sum(0) + positives_exp.sum(0)
+            assert len(denominator) == torch.sum(anchor_same_class_indices), f"{len(denominator)}  {len(anchor_same_class_indices)}"
+
+            accum = 0
+            for global_pos_x, global_pos_y, _ in self.dataloader_by_class(
+                    other_dataset, other_class_indices[i]):
+                assert torch.all(global_pos_y == i)
+                global_pos_x = global_pos_x.to(self.device)
+                global_pos_y = global_pos_y.to(self.device)
+
+                global_pos_feat = self.feature_extractor(global_pos_x, other_index)
+                global_pos_sims = global_pos_feat @ torch.t(feat_i)
+                global_pos_exp = torch.exp(global_pos_sims / self.tau)
+
+                logit = global_pos_exp / denominator.unsqueeze(0)
+                accum += torch.log(logit).sum(0)
+
+            assert len(accum) == torch.sum(anchor_same_class_indices), f"{len(accum)}  {len(anchor_same_class_indices)}"
+
+            accum /= len(self.target_class_indices[i]) 
             
-            if not sum_over_all_positives.isnan():
-                contrastive_loss -= sum_over_all_positives
+            if not accum.isnan().all():
+                contrastive_loss += accum.nansum()
             
-        return contrastive_loss
+        return -contrastive_loss
     
     def split_batch_in_two(self, batch):
         (x, y, y_real) = batch
@@ -484,7 +516,7 @@ class UDAModel(pl.LightningModule):
             contrastive_target_anchor = self.contrastive_step(
                 (target_features, target_y, target_y_real), 
                 (source_features, source_y, source_y_real), 
-                'target'
+                'target',
             )
             contrastive_source_anchor = self.contrastive_step(
                 (source_features, source_y, source_y_real), 
@@ -649,6 +681,15 @@ class UDAModel(pl.LightningModule):
                           batch_size=self.batch_size,
                           pin_memory=True,
                           shuffle=False,
+                          num_workers=self.num_workers)
+
+    def dataloader_by_class(self, dataset, indices):
+        np.random.shuffle(indices)
+
+        return DataLoader(dataset,
+                          batch_size=self.batch_size,
+                          pin_memory=True,
+                          sampler=SubsetRandomSampler(indices),
                           num_workers=self.num_workers)
     
     def train_dataloader(self):
