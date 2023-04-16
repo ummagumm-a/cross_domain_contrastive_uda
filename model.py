@@ -161,7 +161,7 @@ class UDAModel(pl.LightningModule):
     def class_analysis(self, dataset):
         labels = dataset.labels
         real_labels = dataset.real_labels
-        self.logger.experiment.add_scalar(f'Mislabeled fraction', np.mean(labels != real_labels), self.current_epoch)
+#        self.logger.experiment.add_scalar(f'Mislabeled fraction', np.mean(labels != real_labels), self.current_epoch)
 
         # find unassigned labels
         # unassigned_labels = set(range(31)).difference(np.unique(labels).tolist())
@@ -190,7 +190,7 @@ class UDAModel(pl.LightningModule):
         assert len(max_sims) == len(features)
         # Take only samples which are 'close enough' to class centroids
         mask = max_sims > self.pseudo_filter_threshold
-        self.logger.experiment.add_scalar(f'Close enough targets', np.sum(mask), self.current_epoch)
+#        self.logger.experiment.add_scalar(f'Close enough targets', np.sum(mask), self.current_epoch)
 
         # If the setting is to not allow mislabeled samples in training dataset
         if self.remove_mismatched:
@@ -203,7 +203,7 @@ class UDAModel(pl.LightningModule):
         self.valid_target_samples = np.arange(len(self.train_target_dataset))[mask]
         np.random.shuffle(self.valid_target_samples)
 
-        self.logger.experiment.add_scalar(f'Remaining targets', np.sum(mask), self.current_epoch)
+#        self.logger.experiment.add_scalar(f'Remaining targets', np.sum(mask), self.current_epoch)
 
     def on_train_epoch_start(self):
 #        if self.pretrain_num_epochs <= self.current_epoch:
@@ -228,7 +228,7 @@ class UDAModel(pl.LightningModule):
 
             # Filter out unwanted samples from training data. 
             self.filter_after_cluster(all_features, clusterizer.cluster_centers_)
-            self.log('unique labels', len(np.unique(self.train_target_dataset.labels)))
+#            self.log('unique labels', len(np.unique(self.train_target_dataset.labels)))
 
         self.feature_extractor.train()
 
@@ -248,7 +248,7 @@ class UDAModel(pl.LightningModule):
         probs = F.softmax(pred.detach(), dim=1)
         probs = probs.max(dim=1).values.mean().item()
 
-        self.log('mean_pred_prob', probs, on_epoch=True, on_step=False)
+#        self.log('mean_pred_prob', probs, on_epoch=True, on_step=False)
 
         class_loss = self.classification_loss(pred, y)
         
@@ -587,15 +587,15 @@ class UDAModel(pl.LightningModule):
                 self.manual_backward(contrastive_loss, retain_graph=True)
                 with torch.no_grad():
                     grads2 = self.extract_gradients()
-                    self.log_grad_norm(grads2, "Contrastive")
-            else:
-                self.logger.experiment.add_scalar(f'Contrastive loss grad norm', 0, self.global_step)
+#                    self.log_grad_norm(grads2, "Contrastive")
+#            else:
+#                self.logger.experiment.add_scalar(f'Contrastive loss grad norm', 0, self.global_step)
 
             opt.zero_grad()
             self.manual_backward(classification_loss, retain_graph=True)
             with torch.no_grad():
                 grads1 = self.extract_gradients()
-                self.log_grad_norm(grads1, "Classification")
+#                self.log_grad_norm(grads1, "Classification")
 
     #        sum_grads = self.sum_gradients(grads1, grads2)
     #        self.log_grad_norm(grads2, "Total Test")
@@ -605,7 +605,7 @@ class UDAModel(pl.LightningModule):
             self.manual_backward(train_loss)
             with torch.no_grad():
                 grads = self.extract_gradients()
-                self.log_grad_norm(grads, "Total")
+#                self.log_grad_norm(grads, "Total")
 
             # Make a step
             self.clip_gradients(opt, gradient_clip_val=self.grad_clip, gradient_clip_algorithm="norm")
@@ -615,11 +615,11 @@ class UDAModel(pl.LightningModule):
             if self.trainer.is_last_batch:
                 sch.step()
 
-        self.log_dict({
-            "classification_loss": classification_loss,
-            "contrastive_loss": contrastive_loss,
-            "train_loss": train_loss
-        }, on_epoch=True, on_step=False)
+#        self.log_dict({
+#            "classification_loss": classification_loss,
+#            "contrastive_loss": contrastive_loss,
+#            "train_loss": train_loss
+#        }, on_epoch=True, on_step=False)
                 
         return train_loss
     
@@ -649,7 +649,7 @@ class UDAModel(pl.LightningModule):
             pred = self(x, dsbn_index)
             loss = self.classification_loss(pred, y)
 
-            self.log(f"{domain_name}_val_loss", loss, on_epoch=True, on_step=False, add_dataloader_idx=False)
+#            self.log(f"{domain_name}_val_loss", loss, on_epoch=True, on_step=False, add_dataloader_idx=False)
             self.log_dict(self.val_metrics(pred, y, domain_name), on_epoch=True, on_step=False, add_dataloader_idx=False)
             
         # Evaluate source accuracy
