@@ -144,25 +144,25 @@ def train_single_fold(fold_num, office_datasets=None, visda_datasets=None):
     cp = lambda x: tuple(map(lambda y: copy.deepcopy(y), x))
 
     dataset_pairs = [
-#        ('aw', 31, cp(amazon_dataset), cp(webcam_dataset)),
-#        ('ad', 31, cp(amazon_dataset), cp(dslr_dataset)),
-#        ('wa', 31, cp(webcam_dataset), cp(amazon_dataset)),
-#        ('wd', 31, cp(webcam_dataset), cp(dslr_dataset)),
-#        ('da', 31, cp(dslr_dataset), cp(amazon_dataset)),
-#        ('dw', 31, cp(dslr_dataset), cp(webcam_dataset)),
+        ('aw', 31, cp(amazon_dataset), cp(webcam_dataset)),
+        ('ad', 31, cp(amazon_dataset), cp(dslr_dataset)),
+        ('wa', 31, cp(webcam_dataset), cp(amazon_dataset)),
+        ('wd', 31, cp(webcam_dataset), cp(dslr_dataset)),
+        ('da', 31, cp(dslr_dataset), cp(amazon_dataset)),
+        ('dw', 31, cp(dslr_dataset), cp(webcam_dataset)),
 #        ('visda', 12, cp(visda_source), cp(visda_target)),
         ]
 
     training_modes = [
-            ('no_adaptation', no_adaptation_setting, 7),
-            ('baseline', baseline_setting, 6), 
-            ('pretrain', pretrain_on_source_setting, 5),
-            ('negative_sampling', negative_sampling_setting, 4), 
-            ('random_sampling', random_negative_sampling_setting, 3),
+#            ('no_adaptation', no_adaptation_setting, 7),
+#            ('baseline', baseline_setting, 6), 
+#            ('pretrain', pretrain_on_source_setting, 5),
+#            ('negative_sampling', negative_sampling_setting, 4), 
+#            ('random_sampling', random_negative_sampling_setting, 3),
             ('smaller_tau_lmbda_baseline', lambda x: smaller_tau_lmbda_setting(baseline_setting(x)), 2),
 
 #            ('smaller_lmbda_baseline', lambda x: smaller_lmbda_setting(baseline_setting(x)), 3),
-            ('smaller_tau_lmbda_baseline', lambda x: smaller_tau_lmbda_setting(baseline_setting(x)), 3),
+#            ('smaller_tau_lmbda_baseline', lambda x: smaller_tau_lmbda_setting(baseline_setting(x)), 3),
 #            ('smaller_tau_baseline', lambda x: smaller_tau_setting(baseline_setting(x)), 7),
 #            
 #            ('negative_sampling', negative_sampling_setting, 1), 
@@ -194,19 +194,19 @@ def train_single_fold(fold_num, office_datasets=None, visda_datasets=None):
 
             resnet.fc2 = FeatureNormL2()
             settings = training_mode(default_settings)
-            if fold_num == 0:
-                settings['track_grad_norm'] = True
+#            if fold_num == 0:
+#                settings['track_grad_norm'] = True
 
             # Default
             version = f'{name}, {setting_name}, fold_{fold_num}'
 
             # add checkpointing to amazon-webcam dataset
-            if fold_num == 1 and 'aw' in version and not ('pretrain' in version or 'random_sampling' in version or 'no_adaptation' in version):
+            if False and fold_num == 1 and 'aw' in version and not ('pretrain' in version or 'random_sampling' in version or 'no_adaptation' in version):
                 model_ckpt = dict(save_last=True, save_top_k=4, every_n_epochs=100)
             else:
                 model_ckpt = dict(save_last=False, save_top_k=0)
 
-            train(resnet, source, target, num_classes, settings, version, device, model_ckpt=model_ckpt, folder='kfold_run')
+            train(resnet, source, target, num_classes, settings, version, device, model_ckpt=model_ckpt, folder='final_kfold_run')
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
