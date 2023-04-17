@@ -154,9 +154,13 @@ def train_single_fold(fold_num, office_datasets=None, visda_datasets=None):
         ]
 
     training_modes = [
-#            ('no_adaptation', no_adaptation_setting, 3),
-#
-#            ('baseline', baseline_setting, 0), 
+            ('no_adaptation', no_adaptation_setting, 7),
+            ('baseline', baseline_setting, 6), 
+            ('pretrain', pretrain_on_source_setting, 5),
+            ('negative_sampling', negative_sampling_setting, 4), 
+            ('random_sampling', random_negative_sampling_setting, 3),
+            ('smaller_tau_lmbda_baseline', lambda x: smaller_tau_lmbda_setting(baseline_setting(x)), 2),
+
 #            ('smaller_lmbda_baseline', lambda x: smaller_lmbda_setting(baseline_setting(x)), 3),
             ('smaller_tau_lmbda_baseline', lambda x: smaller_tau_lmbda_setting(baseline_setting(x)), 3),
 #            ('smaller_tau_baseline', lambda x: smaller_tau_setting(baseline_setting(x)), 7),
