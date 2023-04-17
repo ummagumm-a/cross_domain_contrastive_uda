@@ -98,7 +98,7 @@ def smaller_tau_lmbda_setting(default_params):
 
     return default_params
 
-def train(resnet, source_dataset, target_dataset, num_classes, settings, version, device, model_ckpt, total_epochs=500, folder='shit'):
+def train(resnet, source_dataset, target_dataset, num_classes, settings, version, device, model_ckpt, total_epochs=400, folder='shit'):
 
     logger.info(f"Training settings: \n{settings}")
     # Define the backbone
@@ -161,6 +161,7 @@ def train_single_fold(fold_num, office_datasets=None, visda_datasets=None):
             ('random_sampling', random_negative_sampling_setting, 3),
             ('smaller_tau_lmbda_baseline', lambda x: smaller_tau_lmbda_setting(baseline_setting(x)), 2),
 
+
 #            ('smaller_lmbda_baseline', lambda x: smaller_lmbda_setting(baseline_setting(x)), 3),
 #            ('smaller_tau_baseline', lambda x: smaller_tau_setting(baseline_setting(x)), 7),
 #            
@@ -202,7 +203,7 @@ def train_single_fold(fold_num, office_datasets=None, visda_datasets=None):
             else:
                 model_ckpt = dict(save_last=False, save_top_k=0)
 
-            train(resnet, source, target, num_classes, settings, version, device, model_ckpt=model_ckpt, folder='final_kfold_run')
+            train(resnet, source, target, num_classes, settings, version, device, model_ckpt=model_ckpt, folder='final_kfold_run', total_epochs=3)
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
